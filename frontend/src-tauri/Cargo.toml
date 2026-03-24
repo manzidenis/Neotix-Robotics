@@ -1,0 +1,27 @@
+[package]
+name = "neotix-robotics-platform"
+version = "0.1.0"
+description = "Neotix Robotics Data Platform — Desktop App"
+authors = ["Neotix Robotics"]
+license = "MIT"
+repository = ""
+default-run = "neotix-robotics-platform"
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "neotix_robotics_platform_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "neotix-robotics-platform"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
