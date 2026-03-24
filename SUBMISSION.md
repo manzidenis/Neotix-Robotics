@@ -1,14 +1,5 @@
 # Submission — Full Stack Software Engineering Assessment
 
-## Candidate Information
-
-- **Name: Denis Manzi**
-- **Email: manzidenisc@gmail.com**
-- **GitHub Username: manzidenis**
-- **Date Submitted:23/3/2026**
-
----
-
 ## Project status
 
 End-to-end flow verified: **FastAPI** on port **8000** + **Vite** dev server + **Tauri** desktop build (Windows). Backend must be running for episode video proxy, QA export, simulator WebSocket, and related API calls.
@@ -93,8 +84,6 @@ Requires **Rust** (need to install it). Windows builds need valid **`frontend/sr
 ---
 
 ## Checklist
-
-_Mark each item with [x] when complete._
 
 ### Part A: Backend
 
@@ -257,7 +246,7 @@ All data is scoped by `user_id`. Datasets, episodes, QA state, and activity logs
 
 ---
 
-## Notes for Reviewer
+## Notes
 
 - **Swagger UI**: Visit `/docs` and click Authorize. Enter username/password, leave client fields blank. The `/auth/login/swagger` endpoint handles form-data auth for Swagger; the frontend uses `/auth/login` with JSON.
 - **Multi-user isolation**: All data is scoped by `user_id`. Cache is cleared on auth state changes to prevent cross-user leakage.
