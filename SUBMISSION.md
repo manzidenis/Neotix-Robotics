@@ -1,5 +1,3 @@
-# Project Assessment
-
 ## Project status
 
 End-to-end flow verified: **FastAPI** on port **8000** + **Vite** dev server + **Tauri** desktop build (Windows). Backend must be running for episode video proxy, QA export, simulator WebSocket, and related API calls.
