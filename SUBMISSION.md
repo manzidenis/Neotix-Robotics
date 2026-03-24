@@ -1,4 +1,4 @@
-# Submission — Full Stack Software Engineering Assessment
+# Project Assessment
 
 ## Project status
 
