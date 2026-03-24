@@ -1,0 +1,32 @@
+# Neotix Robotics Data Platform — Python dependencies
+# Python 3.11+ recommended
+
+# API
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9
+pydantic[email]>=2.0.0
+
+# Auth
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+bcrypt==3.2.2
+
+# Persistence & data
+sqlalchemy>=2.0.0
+pandas>=2.0
+pyarrow>=14.0
+numpy>=1.26
+aiofiles>=23.0.0
+
+# Simulator & replay
+mujoco>=3.1.0
+opencv-python-headless>=4.8.0
+websockets>=12.0
+
+# Hugging Face dataset download (optional, for sample data)
+huggingface_hub>=0.21.0
+
+# Tests
+pytest>=8.0
+httpx>=0.27.0

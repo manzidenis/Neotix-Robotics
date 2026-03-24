@@ -1,0 +1,47 @@
+# Dataset (submit via download link, not git)
+data/
+
+# Sim replay output
+replays/
+*.mp4
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+.venv/
+venv/
+
+# Node / frontend
+node_modules/
+dist/
+.next/
+.nuxt/
+build/
+
+# IDE
+.vscode/
+.idea/
+frontend/.claude/
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.local
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# OpenH264 DLL (auto-downloaded by OpenCV)
+openh264-*.dll
+
+# Tauri build artifacts
+frontend/src-tauri/target/
