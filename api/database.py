@@ -1,22 +1,27 @@
 from sqlalchemy import create_engine, event
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from api.config import settings
 
-engine = create_engine(
-    settings.DATABASE_URL,
-    connect_args={"check_same_thread": False},
-)
+db_url = make_url(settings.DATABASE_URL)
+engine_kwargs = {"pool_pre_ping": True}
+
+if db_url.get_backend_name() == "sqlite":
+    engine_kwargs["connect_args"] = {"check_same_thread": False}
+
+engine = create_engine(settings.DATABASE_URL, **engine_kwargs)
 
 
-@event.listens_for(engine, "connect")
-def _set_sqlite_pragma(dbapi_conn, connection_record):
-    cursor = dbapi_conn.cursor()
-    cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA synchronous=NORMAL")
-    cursor.execute("PRAGMA busy_timeout=5000")
-    cursor.execute("PRAGMA cache_size=-32000")
-    cursor.close()
+if db_url.get_backend_name() == "sqlite":
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragma(dbapi_conn, connection_record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+        cursor.execute("PRAGMA cache_size=-32000")
+        cursor.close()
 
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -41,6 +46,9 @@ def init_db() -> None:
 
 def _run_migrations() -> None:
     """Lightweight migration: add columns that may be missing in existing DBs."""
+    if engine.dialect.name != "sqlite":
+        return
+
     from sqlalchemy import text, inspect
     insp = inspect(engine)
     cols = {c["name"] for c in insp.get_columns("datasets")} if insp.has_table("datasets") else set()

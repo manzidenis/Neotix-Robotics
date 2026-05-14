@@ -14,6 +14,7 @@ bcrypt==3.2.2
 
 # Persistence & data
 sqlalchemy>=2.0.0
+psycopg[binary]>=3.2.0
 pandas>=2.0
 pyarrow>=14.0
 numpy>=1.26

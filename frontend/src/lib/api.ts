@@ -1,9 +1,15 @@
 import axios from 'axios'
 import { useAuthStore } from '@/store'
 
-// In development, VITE_API_BASE points directly to the backend (bypasses proxy).
-// In production, leave empty so relative paths are used.
-const API_BASE = (import.meta.env.VITE_API_BASE as string) ?? ''
+const rawApiBase = (import.meta.env.VITE_API_BASE as string | undefined)?.trim()
+const rawWsBase = (import.meta.env.VITE_WS_BASE as string | undefined)?.trim()
+
+export const API_BASE = rawApiBase ? rawApiBase.replace(/\/+$/, '') : ''
+export const WS_BASE = rawWsBase
+  ? rawWsBase.replace(/\/+$/, '')
+  : API_BASE
+    ? API_BASE.replace(/^http/i, 'ws')
+    : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`
 
 export const api = axios.create({
   baseURL: API_BASE,

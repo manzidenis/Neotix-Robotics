@@ -12,16 +12,16 @@ Operators manage robotics data through this platform instead of ad-hoc scripts: 
 
 ## Tech stack
 
-| Layer | Technologies |
-|--------|----------------|
-| **Backend** | FastAPI, Uvicorn, SQLAlchemy, SQLite, JWT (python-jose), passlib/bcrypt |
-| **Data / sim** | pandas, pyarrow, NumPy, MuJoCo, OpenCV (headless), Hugging Face Hub |
-| **Frontend** | Vite 6, React 18, TypeScript, React Router 6, TanStack Query, Zustand |
-| **UI** | Tailwind CSS v4, Radix UI, shadcn-style components, Framer Motion, Sonner |
-| **3D** | Three.js, React Three Fiber, Drei, postprocessing |
-| **Charts** | Visx, D3 |
-| **Desktop (optional)** | Tauri 2 |
-| **Ops** | Docker / Docker Compose, nginx (frontend image) |
+| Layer                  | Technologies                                                              |
+| ---------------------- | ------------------------------------------------------------------------- |
+| **Backend**            | FastAPI, Uvicorn, SQLAlchemy, SQLite, JWT (python-jose), passlib/bcrypt   |
+| **Data / sim**         | pandas, pyarrow, NumPy, MuJoCo, OpenCV (headless), Hugging Face Hub       |
+| **Frontend**           | Vite 6, React 18, TypeScript, React Router 6, TanStack Query, Zustand     |
+| **UI**                 | Tailwind CSS v4, Radix UI, shadcn-style components, Framer Motion, Sonner |
+| **3D**                 | Three.js, React Three Fiber, Drei, postprocessing                         |
+| **Charts**             | Visx, D3                                                                  |
+| **Desktop (optional)** | Tauri 2                                                                   |
+| **Ops**                | Docker / Docker Compose, nginx (frontend image)                           |
 
 API docs: `http://localhost:8000/docs` (Swagger with **Authorize** for JWT).
 
@@ -83,6 +83,14 @@ Open **`http://localhost:3000`** (or the port Vite prints). For **video/API** fe
 
 ---
 
+## Cloud deployment
+
+- Frontend: Vercel
+- Backend: Render free web service
+- Database: Neon free Postgres
+
+---
+
 ## Repository layout
 
 - **`api/`** — FastAPI app (routers: auth, datasets, episodes, qa, merge, activity, stats, simulator)
@@ -95,5 +103,3 @@ Open **`http://localhost:3000`** (or the port Vite prints). For **video/API** fe
 ## More detail
 
 Implementation notes, checklist, design decisions, and full run instructions: **`SUBMISSION.md`**.
-
-

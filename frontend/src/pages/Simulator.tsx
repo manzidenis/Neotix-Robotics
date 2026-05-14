@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Play, Square, ChevronRight, ChevronLeft, RotateCcw, RotateCw, Wifi, WifiOff, Film, Search, HelpCircle, Gauge } from 'lucide-react'
-import { episodesApi } from '@/lib/api'
+import { episodesApi, WS_BASE } from '@/lib/api'
 import { useAppStore, useAuthStore } from '@/store'
 import { Episode, SimInfo } from '@/types'
 import { Button } from '@/components/ui/button'
@@ -65,9 +65,8 @@ export default function SimulatorPage() {
   const connect = useCallback(() => {
     if (reconnectTimer.current) { clearTimeout(reconnectTimer.current); reconnectTimer.current = null }
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const token = useAuthStore.getState().token
-    const socket = new WebSocket(`${protocol}//${window.location.host}/ws/simulator?token=${encodeURIComponent(token || '')}`)
+    const socket = new WebSocket(`${WS_BASE}/ws/simulator?token=${encodeURIComponent(token || '')}`)
     socket.binaryType = 'arraybuffer'
 
     socket.onopen = () => {

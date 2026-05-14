@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: neotrix-backend
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile.backend
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DATABASE_URL
+        sync: false
+      - key: DATASET_BASE_PATH
+        value: /app/data
+      - key: CORS_ORIGINS
+        sync: false
