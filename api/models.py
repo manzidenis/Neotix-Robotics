@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    Boolean, Column, DateTime, Float, ForeignKey,
+    BigInteger, Boolean, Column, DateTime, Float, ForeignKey,
     Index, Integer, String, Text,
 )
 
@@ -98,7 +98,7 @@ class DatasetUploadJob(Base):
     source_filename = Column(Text, nullable=False)
     source_path    = Column(Text, nullable=False)
     upload_id      = Column(Text, nullable=False)
-    file_size      = Column(Integer, default=0)
+    file_size      = Column(BigInteger, default=0)
     status         = Column(String(24), default="initiated", index=True)
     progress       = Column(Float, default=0.0)
     dataset_id     = Column(Integer, nullable=True)

@@ -102,4 +102,5 @@ def _run_migrations() -> None:
                 conn.execute(text("ALTER TABLE dataset_upload_jobs ALTER COLUMN source_filename TYPE TEXT"))
                 conn.execute(text("ALTER TABLE dataset_upload_jobs ALTER COLUMN source_path TYPE TEXT"))
                 conn.execute(text("ALTER TABLE dataset_upload_jobs ALTER COLUMN upload_id TYPE TEXT"))
+                conn.execute(text("ALTER TABLE dataset_upload_jobs ALTER COLUMN file_size TYPE BIGINT"))
                 conn.execute(text("ALTER TABLE dataset_upload_jobs ALTER COLUMN error_message TYPE TEXT"))
