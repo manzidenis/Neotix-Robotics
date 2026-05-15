@@ -45,6 +45,7 @@ export interface DatasetFolderUploadProgress {
 
 const MAX_PARALLEL_PART_UPLOADS = 4
 const MAX_PARALLEL_FILE_UPLOADS = 6
+const FOLDER_PREPARE_BATCH_SIZE = 64
 const DATASET_CONTROL_TIMEOUT_MS = 300_000
 
 export function resolveAssetUrl(path: string) {
@@ -236,7 +237,7 @@ export const datasetsApi = {
       const parts = rawRelative.split('/').filter(Boolean)
       const relativePath = parts.length > 1 && parts[0] === name ? parts.slice(1).join('/') : rawRelative
       return { file, relativePath }
-    })
+    }).sort((a, b) => b.file.size - a.file.size)
 
     const totalBytes = entries.reduce((sum, entry) => sum + entry.file.size, 0) || 1
     let uploadedBytes = 0
@@ -244,21 +245,10 @@ export const datasetsApi = {
 
     onProgress?.({ phase: 'starting', uploadPercent: 0, filesUploaded: 0, totalFiles: entries.length })
 
-    const prepare = await api.post(
-      '/datasets/folder-upload/prepare',
-      {
-        dataset_name: name,
-        files: entries.map(({ file, relativePath }) => ({
-          relative_path: relativePath,
-          size: file.size,
-          content_type: file.type || 'application/octet-stream',
-        })),
-      },
+    await api.post(
+      '/datasets/folder-upload/start',
+      { dataset_name: name },
       { timeout: DATASET_CONTROL_TIMEOUT_MS },
-    )
-
-    const urlByPath = new Map<string, string>(
-      (prepare.data.uploads as Array<{ relative_path: string; url: string }>).map((item) => [item.relative_path, item.url]),
     )
 
     const emitProgress = () => {
@@ -270,48 +260,147 @@ export const datasetsApi = {
       })
     }
 
-    let nextIndex = 0
-    const uploadNextFile = async () => {
-      while (nextIndex < entries.length) {
-        const currentIndex = nextIndex
-        nextIndex += 1
-        const entry = entries[currentIndex]
-        const url = urlByPath.get(entry.relativePath)
-        if (!url) {
-          throw new Error(`Missing upload URL for ${entry.relativePath}`)
-        }
-        await uploadBlobToPresignedUrl(url, entry.file, (delta) => {
-          uploadedBytes += delta
+    const uploadMultipartFile = async (
+      entry: { file: File; relativePath: string },
+      uploadId: string,
+      partSize: number,
+      partUrls: Array<{ part_number: number; url: string }>,
+    ) => {
+      const completedParts: Array<{ part_number: number; etag: string }> = []
+      let nextPartIndex = 0
+
+      const uploadNextPart = async () => {
+        while (nextPartIndex < partUrls.length) {
+          const currentPartIndex = nextPartIndex
+          nextPartIndex += 1
+          const part = partUrls[currentPartIndex]
+          const start = (part.part_number - 1) * partSize
+          const end = Math.min(start + partSize, entry.file.size)
+          const chunk = entry.file.slice(start, end)
+          const etag = await uploadBlobToPresignedUrl(part.url, chunk, (delta) => {
+            uploadedBytes += delta
+            emitProgress()
+          })
+          completedParts.push({ part_number: part.part_number, etag })
           emitProgress()
-        })
-        uploadedFiles += 1
-        emitProgress()
+        }
       }
+
+      await Promise.all(
+        Array.from({ length: Math.min(MAX_PARALLEL_PART_UPLOADS, partUrls.length) }, () => uploadNextPart()),
+      )
+
+      await api.post(
+        '/datasets/folder-upload/file-complete',
+        {
+          dataset_name: name,
+          relative_path: entry.relativePath,
+          upload_id: uploadId,
+          parts: completedParts,
+        },
+        { timeout: DATASET_CONTROL_TIMEOUT_MS },
+      )
     }
 
-    await Promise.all(
-      Array.from({ length: Math.min(MAX_PARALLEL_FILE_UPLOADS, entries.length) }, () => uploadNextFile()),
-    )
+    try {
+      for (let startIndex = 0; startIndex < entries.length; startIndex += FOLDER_PREPARE_BATCH_SIZE) {
+        const batch = entries.slice(startIndex, startIndex + FOLDER_PREPARE_BATCH_SIZE)
+        const prepare = await api.post(
+          '/datasets/folder-upload/prepare-batch',
+          {
+            dataset_name: name,
+            files: batch.map(({ file, relativePath }) => ({
+              relative_path: relativePath,
+              size: file.size,
+              content_type: file.type || 'application/octet-stream',
+            })),
+          },
+          { timeout: DATASET_CONTROL_TIMEOUT_MS },
+        )
 
-    onProgress?.({
-      phase: 'finalizing',
-      uploadPercent: 100,
-      filesUploaded: entries.length,
-      totalFiles: entries.length,
-    })
+        const specs = new Map<string, any>(
+          (prepare.data.uploads as Array<any>).map((item) => [item.relative_path, item]),
+        )
 
-    const complete = await api.post(
-      '/datasets/folder-upload/complete',
-      { dataset_name: name },
-      { timeout: DATASET_CONTROL_TIMEOUT_MS },
-    )
-    onProgress?.({
-      phase: 'done',
-      uploadPercent: 100,
-      filesUploaded: entries.length,
-      totalFiles: entries.length,
-    })
-    return complete.data
+        let nextIndex = 0
+        const uploadNextFile = async () => {
+          while (nextIndex < batch.length) {
+            const currentIndex = nextIndex
+            nextIndex += 1
+            const entry = batch[currentIndex]
+            const spec = specs.get(entry.relativePath)
+            if (!spec) {
+              throw new Error(`Missing upload spec for ${entry.relativePath}`)
+            }
+
+            if (spec.mode === 'multipart') {
+              try {
+                await uploadMultipartFile(entry, spec.upload_id, spec.part_size_bytes, spec.part_urls)
+              } catch (error) {
+                try {
+                  await api.post(
+                    '/datasets/folder-upload/file-abort',
+                    {
+                      dataset_name: name,
+                      relative_path: entry.relativePath,
+                      upload_id: spec.upload_id,
+                    },
+                    { timeout: DATASET_CONTROL_TIMEOUT_MS },
+                  )
+                } catch {
+                  // Best effort cleanup.
+                }
+                throw error
+              }
+            } else {
+              await uploadBlobToPresignedUrl(spec.url, entry.file, (delta) => {
+                uploadedBytes += delta
+                emitProgress()
+              })
+            }
+
+            uploadedFiles += 1
+            uploadedBytes = Math.min(totalBytes, uploadedBytes)
+            emitProgress()
+          }
+        }
+
+        await Promise.all(
+          Array.from({ length: Math.min(MAX_PARALLEL_FILE_UPLOADS, batch.length) }, () => uploadNextFile()),
+        )
+      }
+
+      onProgress?.({
+        phase: 'finalizing',
+        uploadPercent: 100,
+        filesUploaded: entries.length,
+        totalFiles: entries.length,
+      })
+
+      const complete = await api.post(
+        '/datasets/folder-upload/complete',
+        { dataset_name: name },
+        { timeout: DATASET_CONTROL_TIMEOUT_MS },
+      )
+      onProgress?.({
+        phase: 'done',
+        uploadPercent: 100,
+        filesUploaded: entries.length,
+        totalFiles: entries.length,
+      })
+      return complete.data
+    } catch (error) {
+      try {
+        await api.post(
+          '/datasets/folder-upload/abort',
+          { dataset_name: name },
+          { timeout: DATASET_CONTROL_TIMEOUT_MS },
+        )
+      } catch {
+        // Best effort cleanup.
+      }
+      throw error
+    }
   },
   uploadFolder: (files: File[] | FileList, name?: string) => {
     const form = new FormData()

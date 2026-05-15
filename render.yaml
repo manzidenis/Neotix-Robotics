@@ -31,5 +31,7 @@ services:
         value: "32"
       - key: R2_INGEST_MAX_CONCURRENCY
         value: "4"
+      - key: R2_FOLDER_MULTIPART_THRESHOLD_MB
+        value: "64"
       - key: PUBLIC_DEMO_DATASET_NAMES
         value: ball_to_cup,dirty_towels

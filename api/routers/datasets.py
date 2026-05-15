@@ -556,8 +556,39 @@ async def upload_dataset_folder(
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
-@router.post("/folder-upload/prepare")
-def prepare_direct_folder_upload(
+@router.post("/folder-upload/start")
+def start_direct_folder_upload(
+    body: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not r2_enabled():
+        raise HTTPException(status_code=400, detail="Direct folder uploads require R2 storage to be configured")
+
+    dataset_name = str(body.get("dataset_name", "")).strip()
+    if not dataset_name:
+        raise HTTPException(status_code=422, detail="dataset_name is required")
+    if db.query(Dataset).filter(Dataset.name == dataset_name, Dataset.user_id == current_user.id).first():
+        raise HTTPException(status_code=409, detail=f"Dataset '{dataset_name}' already exists")
+
+    storage_path = str(_dataset_root_storage_path(current_user.id, dataset_name))
+    delete_prefix(storage_path)
+    part_size_bytes = max(5, settings.R2_MULTIPART_PART_SIZE_MB) * 1024 * 1024
+    multipart_threshold_bytes = max(
+        part_size_bytes,
+        settings.R2_FOLDER_MULTIPART_THRESHOLD_MB * 1024 * 1024,
+    )
+
+    return {
+        "dataset_name": dataset_name,
+        "target_path": storage_path,
+        "part_size_bytes": part_size_bytes,
+        "multipart_threshold_bytes": multipart_threshold_bytes,
+    }
+
+
+@router.post("/folder-upload/prepare-batch")
+def prepare_direct_folder_upload_batch(
     body: dict,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -575,29 +606,113 @@ def prepare_direct_folder_upload(
         raise HTTPException(status_code=409, detail=f"Dataset '{dataset_name}' already exists")
 
     storage_path = str(_dataset_root_storage_path(current_user.id, dataset_name))
-    delete_prefix(storage_path)
+    part_size_bytes = max(5, settings.R2_MULTIPART_PART_SIZE_MB) * 1024 * 1024
+    multipart_threshold_bytes = max(
+        part_size_bytes,
+        settings.R2_FOLDER_MULTIPART_THRESHOLD_MB * 1024 * 1024,
+    )
 
     uploads: list[dict[str, str]] = []
-    saw_meta_info = False
     for item in raw_files:
         relative_path = _safe_upload_relative_path(str(item.get("relative_path", "")))
         content_type = str(item.get("content_type", "") or "application/octet-stream")
+        file_size = int(item.get("size", 0) or 0)
+        if file_size < 0:
+            raise HTTPException(status_code=422, detail=f"Invalid size for {relative_path.as_posix()}")
         target_uri = join_uri(storage_path, relative_path.as_posix())
-        if relative_path.as_posix() == "meta/info.json":
-            saw_meta_info = True
-        uploads.append({
-            "relative_path": relative_path.as_posix(),
-            "url": presign_put_object(target_uri, content_type=content_type),
-        })
-
-    if not saw_meta_info:
-        raise HTTPException(status_code=422, detail="Folder upload must include meta/info.json at the dataset root")
+        if file_size >= multipart_threshold_bytes:
+            upload_id = create_multipart_upload(target_uri, content_type=content_type)
+            total_parts = max(1, math.ceil(file_size / part_size_bytes))
+            uploads.append({
+                "relative_path": relative_path.as_posix(),
+                "mode": "multipart",
+                "upload_id": upload_id,
+                "part_size_bytes": part_size_bytes,
+                "total_parts": total_parts,
+                "part_urls": [
+                    {
+                        "part_number": part_number,
+                        "url": presign_upload_part(target_uri, upload_id, part_number),
+                    }
+                    for part_number in range(1, total_parts + 1)
+                ],
+            })
+        else:
+            uploads.append({
+                "relative_path": relative_path.as_posix(),
+                "mode": "single",
+                "url": presign_put_object(target_uri, content_type=content_type),
+            })
 
     return {
         "dataset_name": dataset_name,
         "target_path": storage_path,
         "uploads": uploads,
     }
+
+
+@router.post("/folder-upload/file-complete")
+def complete_direct_folder_upload_file(
+    body: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    dataset_name = str(body.get("dataset_name", "")).strip()
+    relative_path = _safe_upload_relative_path(str(body.get("relative_path", "")))
+    upload_id = str(body.get("upload_id", "")).strip()
+    raw_parts = body.get("parts", [])
+
+    if not dataset_name:
+        raise HTTPException(status_code=422, detail="dataset_name is required")
+    if not upload_id:
+        raise HTTPException(status_code=422, detail="upload_id is required")
+    if not isinstance(raw_parts, list) or not raw_parts:
+        raise HTTPException(status_code=422, detail="parts are required")
+    if db.query(Dataset).filter(Dataset.name == dataset_name, Dataset.user_id == current_user.id).first():
+        raise HTTPException(status_code=409, detail=f"Dataset '{dataset_name}' already exists")
+
+    storage_path = str(_dataset_root_storage_path(current_user.id, dataset_name))
+    target_uri = join_uri(storage_path, relative_path.as_posix())
+
+    parts: list[dict[str, int | str]] = []
+    for item in raw_parts:
+        try:
+            part_number = int(item["part_number"])
+            etag = str(item["etag"]).strip()
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=422, detail="Each part must include part_number and etag") from exc
+        if not etag:
+            raise HTTPException(status_code=422, detail="Each part must include a non-empty etag")
+        parts.append({"PartNumber": part_number, "ETag": etag})
+
+    complete_multipart_upload(target_uri, upload_id, parts)
+    if not object_exists(target_uri):
+        raise HTTPException(status_code=500, detail=f"Upload completed but {relative_path.as_posix()} could not be found")
+
+    return {"detail": f"Completed upload for {relative_path.as_posix()}"}
+
+
+@router.post("/folder-upload/file-abort")
+def abort_direct_folder_upload_file(
+    body: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    dataset_name = str(body.get("dataset_name", "")).strip()
+    relative_path = _safe_upload_relative_path(str(body.get("relative_path", "")))
+    upload_id = str(body.get("upload_id", "")).strip()
+
+    if not dataset_name:
+        raise HTTPException(status_code=422, detail="dataset_name is required")
+    if not upload_id:
+        raise HTTPException(status_code=422, detail="upload_id is required")
+    if db.query(Dataset).filter(Dataset.name == dataset_name, Dataset.user_id == current_user.id).first():
+        raise HTTPException(status_code=409, detail=f"Dataset '{dataset_name}' already exists")
+
+    storage_path = str(_dataset_root_storage_path(current_user.id, dataset_name))
+    target_uri = join_uri(storage_path, relative_path.as_posix())
+    abort_multipart_upload(target_uri, upload_id)
+    return {"detail": f"Aborted upload for {relative_path.as_posix()}"}
 
 
 @router.post("/folder-upload/complete")
@@ -635,11 +750,14 @@ def complete_direct_folder_upload(
 @router.post("/folder-upload/abort")
 def abort_direct_folder_upload(
     body: dict,
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     dataset_name = str(body.get("dataset_name", "")).strip()
     if not dataset_name:
         raise HTTPException(status_code=422, detail="dataset_name is required")
+    if db.query(Dataset).filter(Dataset.name == dataset_name, Dataset.user_id == current_user.id).first():
+        raise HTTPException(status_code=409, detail=f"Dataset '{dataset_name}' is already registered")
 
     storage_path = _dataset_root_storage_path(current_user.id, dataset_name)
     _cleanup_storage_path(storage_path)
