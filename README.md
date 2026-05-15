@@ -1,4 +1,5 @@
 # Neotix Robotics Data Platform
+https://neotix-robotics.vercel.app/
 
 Full-stack web app for browsing, QA-reviewing, merging, and visualizing **LeRobot v2.1** teleoperation datasets (YAM Pro single-arm & bimanual), with a **live MuJoCo simulator**, **async sim-to-MP4 replay**, and optional **Tauri** desktop build.
 
