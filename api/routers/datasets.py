@@ -25,6 +25,7 @@ from api.storage import (
     download_file,
     is_r2_uri,
     join_uri,
+    list_relative_paths,
     open_zip,
     object_exists,
     presign_put_object,
@@ -120,6 +121,29 @@ def _detect_dataset_root_in_archive(names: list[str]) -> PurePosixPath:
 
     candidates.sort(key=lambda item: len(item.parts))
     return candidates[0]
+
+
+def _detect_storage_dataset_root(root: str | Path) -> str | Path:
+    if not is_r2_uri(root):
+        return _detect_dataset_root(Path(root))
+
+    if object_exists(str(_resolve_storage_path(root, "meta/info.json"))):
+        return root
+
+    candidates: list[PurePosixPath] = []
+    for relative_path in list_relative_paths(root):
+        pure = PurePosixPath(relative_path)
+        if len(pure.parts) >= 2 and pure.parts[-2:] == ("meta", "info.json"):
+            candidates.append(pure.parent.parent)
+
+    if not candidates:
+        raise ValueError(f"Not a valid LeRobot v2.1 dataset - missing meta/info.json: {root}")
+
+    candidates.sort(key=lambda item: len(item.parts))
+    dataset_root = candidates[0]
+    if str(dataset_root) == ".":
+        return root
+    return join_uri(str(root), dataset_root.as_posix())
 
 
 def _cleanup_storage_path(path: str | Path) -> None:
@@ -728,13 +752,9 @@ def complete_direct_folder_upload(
         raise HTTPException(status_code=409, detail=f"Dataset '{dataset_name}' already exists")
 
     storage_path = _dataset_root_storage_path(current_user.id, dataset_name)
-    info_path = _resolve_storage_path(storage_path, "meta/info.json")
-    if not object_exists(str(info_path)):
-        _cleanup_storage_path(storage_path)
-        raise HTTPException(status_code=422, detail="Uploaded folder is missing meta/info.json")
-
     try:
-        ds = _register_dataset(db, dataset_name, storage_path, user_id=current_user.id)
+        actual_storage_path = _detect_storage_dataset_root(storage_path)
+        ds = _register_dataset(db, dataset_name, actual_storage_path, user_id=current_user.id)
     except ValueError as exc:
         _cleanup_storage_path(storage_path)
         raise HTTPException(status_code=422, detail=str(exc)) from exc

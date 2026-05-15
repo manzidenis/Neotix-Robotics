@@ -211,6 +211,27 @@ def delete_prefix(root_uri: str) -> None:
                 client.delete_objects(Bucket=bucket, Delete={"Objects": chunk})
 
 
+def list_relative_paths(root_uri: str | os.PathLike[str]) -> list[str]:
+    if not is_r2_uri(root_uri):
+        root = Path(root_uri)
+        if not root.exists():
+            return []
+        return [path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()]
+
+    client = get_r2_client()
+    bucket, base_key = _parse_r2_uri(str(root_uri))
+    prefix = base_key.rstrip("/") + "/"
+    results: list[str] = []
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            rel = key[len(prefix):]
+            if rel:
+                results.append(rel)
+    return results
+
+
 def create_multipart_upload(uri: str, content_type: str = "application/octet-stream") -> str:
     if not is_r2_uri(uri):
         raise ValueError("Multipart upload is only supported for R2 URIs")
