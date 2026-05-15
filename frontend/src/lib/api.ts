@@ -36,6 +36,8 @@ export interface DatasetZipUploadProgress {
   status: DatasetUploadJob['status'] | 'uploading'
 }
 
+const MAX_PARALLEL_PART_UPLOADS = 4
+
 export function resolveAssetUrl(path: string) {
   if (/^https?:\/\//i.test(path)) return path
   if (!ASSET_BASE) return path
@@ -62,6 +64,10 @@ function uploadPartToPresignedUrl(
       if (xhr.status < 200 || xhr.status >= 300) {
         reject(new Error(`Part upload failed with status ${xhr.status}`))
         return
+      }
+      if (blob.size > lastLoaded) {
+        onProgress?.(blob.size - lastLoaded)
+        lastLoaded = blob.size
       }
       const etag = xhr.getResponseHeader('ETag')?.replace(/^"(.*)"$/, '$1')
       if (!etag) {
@@ -139,33 +145,41 @@ export const datasetsApi = {
     const totalParts = Math.max(job.total_parts, 1)
     const completedParts: Array<{ part_number: number; etag: string }> = []
     let uploadedBytes = 0
+    let nextPartNumber = 1
 
     onProgress?.({ phase: 'starting', uploadPercent: 0, ingestPercent: 0, status: job.status })
 
-    for (let partNumber = 1; partNumber <= totalParts; partNumber += 1) {
-      const start = (partNumber - 1) * partSize
-      const end = Math.min(start + partSize, file.size)
-      const chunk = file.slice(start, end)
-
-      const partResp = await api.post(`/datasets/upload-jobs/${job.id}/parts`, { part_number: partNumber })
-      const etag = await uploadPartToPresignedUrl(partResp.data.url, chunk, (delta) => {
-        uploadedBytes += delta
-        onProgress?.({
-          phase: 'uploading',
-          uploadPercent: Math.min(100, Math.round((uploadedBytes / file.size) * 100)),
-          ingestPercent: 0,
-          status: 'uploading',
-        })
-      })
-      uploadedBytes = end
+    const emitUploadProgress = () => {
       onProgress?.({
         phase: 'uploading',
         uploadPercent: Math.min(100, Math.round((uploadedBytes / file.size) * 100)),
         ingestPercent: 0,
         status: 'uploading',
       })
-      completedParts.push({ part_number: partNumber, etag })
     }
+
+    const uploadNextPart = async () => {
+      while (nextPartNumber <= totalParts) {
+        const partNumber = nextPartNumber
+        nextPartNumber += 1
+
+        const start = (partNumber - 1) * partSize
+        const end = Math.min(start + partSize, file.size)
+        const chunk = file.slice(start, end)
+
+        const partResp = await api.post(`/datasets/upload-jobs/${job.id}/parts`, { part_number: partNumber })
+        const etag = await uploadPartToPresignedUrl(partResp.data.url, chunk, (delta) => {
+          uploadedBytes += delta
+          emitUploadProgress()
+        })
+        completedParts.push({ part_number: partNumber, etag })
+        emitUploadProgress()
+      }
+    }
+
+    await Promise.all(
+      Array.from({ length: Math.min(MAX_PARALLEL_PART_UPLOADS, totalParts) }, () => uploadNextPart()),
+    )
 
     const complete = await api.post(`/datasets/upload-jobs/${job.id}/complete`, { parts: completedParts })
     let currentJob = complete.data as DatasetUploadJob

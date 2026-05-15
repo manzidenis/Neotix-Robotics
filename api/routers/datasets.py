@@ -4,6 +4,7 @@ import shutil
 import tempfile
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed
 from pathlib import Path, PurePosixPath
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -159,16 +160,26 @@ def _persist_dataset_archive(source_path: str, name: str, db: Session, user_id: 
             uploaded = True
 
             if is_r2_uri(storage_path):
-                for info in dataset_infos:
-                    archive_member = PurePosixPath(info.filename.replace("\\", "/"))
+                def upload_member(member_name: str, file_size: int) -> int:
+                    archive_member = PurePosixPath(member_name.replace("\\", "/"))
                     relative_path = archive_member.relative_to(archive_root)
                     target_uri = join_uri(str(storage_path), relative_path.as_posix())
-                    with zf.open(info) as member_stream:
-                        upload_fileobj(member_stream, target_uri)
-                    processed_uncompressed += max(0, info.file_size)
-                    if progress_job is not None:
-                        progress_job.progress = 0.3 + (processed_uncompressed / total_uncompressed) * 0.55
-                        db.commit()
+                    with open_zip(source_path) as worker_zip:
+                        with worker_zip.open(member_name) as member_stream:
+                            upload_fileobj(member_stream, target_uri)
+                    return max(0, file_size)
+
+                max_workers = max(1, min(settings.R2_INGEST_MAX_CONCURRENCY, len(dataset_infos)))
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = [
+                        executor.submit(upload_member, info.filename, info.file_size)
+                        for info in dataset_infos
+                    ]
+                    for future in as_completed(futures):
+                        processed_uncompressed += future.result()
+                        if progress_job is not None:
+                            progress_job.progress = 0.3 + (processed_uncompressed / total_uncompressed) * 0.55
+                            db.commit()
             else:
                 actual_root = Path(storage_path)
                 if actual_root.exists():

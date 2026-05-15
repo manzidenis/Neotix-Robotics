@@ -42,6 +42,7 @@ class Settings:
     R2_PUBLIC_DATASET_PREFIX: str = os.getenv("R2_PUBLIC_DATASET_PREFIX", "")
     R2_SIGNED_URL_TTL_SECONDS: int = int(os.getenv("R2_SIGNED_URL_TTL_SECONDS", "3600"))
     R2_MULTIPART_PART_SIZE_MB: int = int(os.getenv("R2_MULTIPART_PART_SIZE_MB", "32"))
+    R2_INGEST_MAX_CONCURRENCY: int = int(os.getenv("R2_INGEST_MAX_CONCURRENCY", "4"))
     PUBLIC_DEMO_DATASET_NAMES: list[str] = _parse_csv(os.getenv("PUBLIC_DEMO_DATASET_NAMES", "ball_to_cup,dirty_towels"))
 
     # CORS origins (comma-separated, or * for all)

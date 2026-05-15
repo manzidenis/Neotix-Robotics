@@ -29,5 +29,7 @@ services:
         value: public-data
       - key: R2_MULTIPART_PART_SIZE_MB
         value: "32"
+      - key: R2_INGEST_MAX_CONCURRENCY
+        value: "4"
       - key: PUBLIC_DEMO_DATASET_NAMES
         value: ball_to_cup,dirty_towels
