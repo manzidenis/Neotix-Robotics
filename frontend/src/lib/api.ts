@@ -36,7 +36,15 @@ export interface DatasetZipUploadProgress {
   status: DatasetUploadJob['status'] | 'uploading'
 }
 
+export interface DatasetFolderUploadProgress {
+  phase: 'starting' | 'uploading' | 'finalizing' | 'done'
+  uploadPercent: number
+  filesUploaded: number
+  totalFiles: number
+}
+
 const MAX_PARALLEL_PART_UPLOADS = 4
+const MAX_PARALLEL_FILE_UPLOADS = 6
 
 export function resolveAssetUrl(path: string) {
   if (/^https?:\/\//i.test(path)) return path
@@ -44,7 +52,7 @@ export function resolveAssetUrl(path: string) {
   return `${ASSET_BASE}${path.startsWith('/') ? path : `/${path}`}`
 }
 
-function uploadPartToPresignedUrl(
+function uploadBlobToPresignedUrl(
   url: string,
   blob: Blob,
   onProgress?: (loaded: number) => void,
@@ -62,7 +70,7 @@ function uploadPartToPresignedUrl(
     }
     xhr.onload = () => {
       if (xhr.status < 200 || xhr.status >= 300) {
-        reject(new Error(`Part upload failed with status ${xhr.status}`))
+        reject(new Error(`Upload failed with status ${xhr.status}`))
         return
       }
       if (blob.size > lastLoaded) {
@@ -168,7 +176,7 @@ export const datasetsApi = {
         const chunk = file.slice(start, end)
 
         const partResp = await api.post(`/datasets/upload-jobs/${job.id}/parts`, { part_number: partNumber })
-        const etag = await uploadPartToPresignedUrl(partResp.data.url, chunk, (delta) => {
+        const etag = await uploadBlobToPresignedUrl(partResp.data.url, chunk, (delta) => {
           uploadedBytes += delta
           emitUploadProgress()
         })
@@ -208,6 +216,85 @@ export const datasetsApi = {
     })
 
     return currentJob
+  },
+  uploadFolderDirect: async (
+    files: File[] | FileList,
+    name: string,
+    onProgress?: (progress: DatasetFolderUploadProgress) => void,
+  ) => {
+    const entries = Array.from(files).map((file) => {
+      const rawRelative = ((file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name).replace(/\\/g, '/')
+      const parts = rawRelative.split('/').filter(Boolean)
+      const relativePath = parts.length > 1 && parts[0] === name ? parts.slice(1).join('/') : rawRelative
+      return { file, relativePath }
+    })
+
+    const totalBytes = entries.reduce((sum, entry) => sum + entry.file.size, 0) || 1
+    let uploadedBytes = 0
+    let uploadedFiles = 0
+
+    onProgress?.({ phase: 'starting', uploadPercent: 0, filesUploaded: 0, totalFiles: entries.length })
+
+    const prepare = await api.post('/datasets/folder-upload/prepare', {
+      dataset_name: name,
+      files: entries.map(({ file, relativePath }) => ({
+        relative_path: relativePath,
+        size: file.size,
+        content_type: file.type || 'application/octet-stream',
+      })),
+    })
+
+    const urlByPath = new Map<string, string>(
+      (prepare.data.uploads as Array<{ relative_path: string; url: string }>).map((item) => [item.relative_path, item.url]),
+    )
+
+    const emitProgress = () => {
+      onProgress?.({
+        phase: 'uploading',
+        uploadPercent: Math.min(100, Math.round((uploadedBytes / totalBytes) * 100)),
+        filesUploaded: uploadedFiles,
+        totalFiles: entries.length,
+      })
+    }
+
+    let nextIndex = 0
+    const uploadNextFile = async () => {
+      while (nextIndex < entries.length) {
+        const currentIndex = nextIndex
+        nextIndex += 1
+        const entry = entries[currentIndex]
+        const url = urlByPath.get(entry.relativePath)
+        if (!url) {
+          throw new Error(`Missing upload URL for ${entry.relativePath}`)
+        }
+        await uploadBlobToPresignedUrl(url, entry.file, (delta) => {
+          uploadedBytes += delta
+          emitProgress()
+        })
+        uploadedFiles += 1
+        emitProgress()
+      }
+    }
+
+    await Promise.all(
+      Array.from({ length: Math.min(MAX_PARALLEL_FILE_UPLOADS, entries.length) }, () => uploadNextFile()),
+    )
+
+    onProgress?.({
+      phase: 'finalizing',
+      uploadPercent: 100,
+      filesUploaded: entries.length,
+      totalFiles: entries.length,
+    })
+
+    const complete = await api.post('/datasets/folder-upload/complete', { dataset_name: name })
+    onProgress?.({
+      phase: 'done',
+      uploadPercent: 100,
+      filesUploaded: entries.length,
+      totalFiles: entries.length,
+    })
+    return complete.data
   },
   uploadFolder: (files: File[] | FileList, name?: string) => {
     const form = new FormData()

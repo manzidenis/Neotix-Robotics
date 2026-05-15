@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Database, Upload, FolderOpen, Merge, Zap, Trash2, Edit2, Check, X, CloudDownload, ChevronLeft, ChevronRight, Search, Download } from 'lucide-react' // eslint-disable-line
 import { datasetsApi, qaApi } from '@/lib/api'
-import type { DatasetZipUploadProgress } from '@/lib/api'
+import type { DatasetFolderUploadProgress, DatasetZipUploadProgress } from '@/lib/api'
 import { useAppStore } from '@/store'
 import { Dataset } from '@/types'
 import { Button } from '@/components/ui/button'
@@ -52,14 +52,18 @@ const activateMut = useMutation({
   })
 
   const folderUploadMut = useMutation({
-    mutationFn: ({ files, name }: { files: File[]; name: string }) => datasetsApi.uploadFolder(files, name),
+    mutationFn: ({ files, name }: { files: File[]; name: string }) => datasetsApi.uploadFolderDirect(files, name, setFolderUploadProgress),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['datasets'] })
       setFolderSelection(null)
+      setFolderUploadProgress(null)
       if (folderInputRef.current) folderInputRef.current.value = ''
       toast.success('Dataset folder uploaded')
     },
-    onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Folder upload failed'),
+    onError: (e: unknown) => {
+      setFolderUploadProgress(null)
+      toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail || (e as Error)?.message || 'Folder upload failed')
+    },
   })
 
   const uploadMut = useMutation({
@@ -87,6 +91,7 @@ const activateMut = useMutation({
   const [uploadFile, setUploadFile] = useState<File | null>(null)
   const [zipUploadProgress, setZipUploadProgress] = useState<DatasetZipUploadProgress | null>(null)
   const [folderSelection, setFolderSelection] = useState<{ name: string; files: File[] } | null>(null)
+  const [folderUploadProgress, setFolderUploadProgress] = useState<DatasetFolderUploadProgress | null>(null)
   const [sourceFilter, setSourceFilter] = useState('')
   const [nameSearch, setNameSearch] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -138,6 +143,7 @@ const activateMut = useMutation({
     const firstRelativePath = (files[0] as File & { webkitRelativePath?: string }).webkitRelativePath || files[0].name
     const name = firstRelativePath.split('/')[0] || files[0].name
     setFolderSelection({ name, files })
+    setFolderUploadProgress(null)
     if (folderInputRef.current) folderInputRef.current.value = ''
   }
 
@@ -177,7 +183,7 @@ const activateMut = useMutation({
         {folderSelection && (
           <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} style={{ overflow: 'hidden', marginBottom: 18 }}>
             <div style={{ borderRadius: 14, padding: '20px 22px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.1)', position: 'relative' }}>
-              <button onClick={() => setFolderSelection(null)} style={{ position: 'absolute', top: 10, right: 10, background: 'none', border: 'none', color: 'rgba(255,255,255,0.25)', cursor: 'pointer', padding: 4, display: 'flex', borderRadius: 4, transition: 'color 0.15s' }}
+              <button onClick={() => { setFolderSelection(null); setFolderUploadProgress(null) }} style={{ position: 'absolute', top: 10, right: 10, background: 'none', border: 'none', color: 'rgba(255,255,255,0.25)', cursor: 'pointer', padding: 4, display: 'flex', borderRadius: 4, transition: 'color 0.15s' }}
                 onMouseEnter={(e) => (e.currentTarget.style.color = '#fff')}
                 onMouseLeave={(e) => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}>
                 <X style={{ width: 13, height: 13 }} />
@@ -191,6 +197,30 @@ const activateMut = useMutation({
                   <p style={{ fontSize: 10, fontFamily: 'monospace', color: 'rgba(255,255,255,0.35)', margin: '4px 0 0', padding: '3px 8px', background: 'rgba(255,255,255,0.04)', borderRadius: 4, display: 'inline-block' }}>
                     {folderSelection.files.length} files ready for upload
                   </p>
+                  {folderUploadProgress && (
+                    <div style={{ marginTop: 10 }}>
+                      <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.45)', margin: '0 0 6px' }}>
+                        {folderUploadProgress.phase === 'uploading'
+                          ? `Uploading files to R2... ${folderUploadProgress.uploadPercent}% (${folderUploadProgress.filesUploaded}/${folderUploadProgress.totalFiles})`
+                          : folderUploadProgress.phase === 'finalizing'
+                            ? 'Finalizing dataset registration...'
+                            : folderUploadProgress.phase === 'done'
+                              ? 'Folder upload complete'
+                              : 'Preparing folder upload...'}
+                      </p>
+                      <div style={{ width: '100%', height: 6, borderRadius: 999, background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
+                        <div
+                          style={{
+                            width: `${folderUploadProgress.uploadPercent}%`,
+                            height: '100%',
+                            background: '#fff',
+                            opacity: folderUploadProgress.phase === 'finalizing' ? 0.65 : 0.9,
+                            transition: 'width 0.2s ease',
+                          }}
+                        />
+                      </div>
+                    </div>
+                  )}
                 </div>
                 <Button size="sm" onClick={() => folderUploadMut.mutate({ files: folderSelection.files, name: folderSelection.name })} loading={folderUploadMut.isPending}>
                   <CloudDownload className="w-3.5 h-3.5" /> Upload

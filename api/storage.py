@@ -275,6 +275,21 @@ def presigned_url(uri: str, expires_in: int | None = None) -> str:
     )
 
 
+def presign_put_object(uri: str, content_type: str | None = None, expires_in: int | None = None) -> str:
+    if not is_r2_uri(uri):
+        raise ValueError("Presigned object uploads are only supported for R2 URIs")
+    client = get_r2_client()
+    bucket, key = _parse_r2_uri(uri)
+    params: dict[str, str] = {"Bucket": bucket, "Key": key}
+    if content_type:
+        params["ContentType"] = content_type
+    return client.generate_presigned_url(
+        "put_object",
+        Params=params,
+        ExpiresIn=expires_in or settings.R2_SIGNED_URL_TTL_SECONDS,
+    )
+
+
 class _R2SeekableReader(io.RawIOBase):
     def __init__(self, uri: str, chunk_size: int = 8 * 1024 * 1024, max_cached_chunks: int = 8):
         if not is_r2_uri(uri):

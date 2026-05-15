@@ -27,6 +27,7 @@ from api.storage import (
     join_uri,
     open_zip,
     object_exists,
+    presign_put_object,
     presign_upload_part,
     r2_enabled,
     read_text,
@@ -215,6 +216,12 @@ def _safe_upload_relative_path(filename: str) -> Path:
     if not parts or any(part == ".." for part in parts):
         raise HTTPException(status_code=422, detail=f"Invalid uploaded path: {filename!r}")
     return Path(*parts)
+
+
+def _dataset_root_storage_path(user_id: int, dataset_name: str) -> str | Path:
+    if r2_enabled():
+        return dataset_root_uri(user_id, dataset_name)
+    return settings.DATASET_BASE_PATH / dataset_name
 
 
 def _sync_episodes(db: Session, dataset: Dataset, path: str | Path) -> None:
@@ -547,6 +554,96 @@ async def upload_dataset_folder(
         return _dataset_out(ds)
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)
+
+
+@router.post("/folder-upload/prepare")
+def prepare_direct_folder_upload(
+    body: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not r2_enabled():
+        raise HTTPException(status_code=400, detail="Direct folder uploads require R2 storage to be configured")
+
+    dataset_name = str(body.get("dataset_name", "")).strip()
+    raw_files = body.get("files", [])
+    if not dataset_name:
+        raise HTTPException(status_code=422, detail="dataset_name is required")
+    if not isinstance(raw_files, list) or not raw_files:
+        raise HTTPException(status_code=422, detail="files are required")
+    if db.query(Dataset).filter(Dataset.name == dataset_name, Dataset.user_id == current_user.id).first():
+        raise HTTPException(status_code=409, detail=f"Dataset '{dataset_name}' already exists")
+
+    storage_path = str(_dataset_root_storage_path(current_user.id, dataset_name))
+    delete_prefix(storage_path)
+
+    uploads: list[dict[str, str]] = []
+    saw_meta_info = False
+    for item in raw_files:
+        relative_path = _safe_upload_relative_path(str(item.get("relative_path", "")))
+        content_type = str(item.get("content_type", "") or "application/octet-stream")
+        target_uri = join_uri(storage_path, relative_path.as_posix())
+        if relative_path.as_posix() == "meta/info.json":
+            saw_meta_info = True
+        uploads.append({
+            "relative_path": relative_path.as_posix(),
+            "url": presign_put_object(target_uri, content_type=content_type),
+        })
+
+    if not saw_meta_info:
+        raise HTTPException(status_code=422, detail="Folder upload must include meta/info.json at the dataset root")
+
+    return {
+        "dataset_name": dataset_name,
+        "target_path": storage_path,
+        "uploads": uploads,
+    }
+
+
+@router.post("/folder-upload/complete")
+def complete_direct_folder_upload(
+    body: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    dataset_name = str(body.get("dataset_name", "")).strip()
+    if not dataset_name:
+        raise HTTPException(status_code=422, detail="dataset_name is required")
+    if db.query(Dataset).filter(Dataset.name == dataset_name, Dataset.user_id == current_user.id).first():
+        raise HTTPException(status_code=409, detail=f"Dataset '{dataset_name}' already exists")
+
+    storage_path = _dataset_root_storage_path(current_user.id, dataset_name)
+    info_path = _resolve_storage_path(storage_path, "meta/info.json")
+    if not object_exists(str(info_path)):
+        _cleanup_storage_path(storage_path)
+        raise HTTPException(status_code=422, detail="Uploaded folder is missing meta/info.json")
+
+    try:
+        ds = _register_dataset(db, dataset_name, storage_path, user_id=current_user.id)
+    except ValueError as exc:
+        _cleanup_storage_path(storage_path)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception:
+        _cleanup_storage_path(storage_path)
+        raise
+
+    log_activity(db, current_user, "upload_dataset", f"Uploaded folder '{dataset_name}'", dataset_id=ds.id)
+    db.commit()
+    return _dataset_out(ds)
+
+
+@router.post("/folder-upload/abort")
+def abort_direct_folder_upload(
+    body: dict,
+    current_user: User = Depends(get_current_user),
+):
+    dataset_name = str(body.get("dataset_name", "")).strip()
+    if not dataset_name:
+        raise HTTPException(status_code=422, detail="dataset_name is required")
+
+    storage_path = _dataset_root_storage_path(current_user.id, dataset_name)
+    _cleanup_storage_path(storage_path)
+    return {"detail": f"Cleared upload for '{dataset_name}'"}
 
 
 @router.post("/upload-jobs/init")
