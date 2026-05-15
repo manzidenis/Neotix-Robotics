@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+import uuid
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Iterator
@@ -77,6 +78,14 @@ def replay_object_uri(user_id: int | None, episode_id: int) -> str:
     return f"r2://{settings.R2_BUCKET}/{key}"
 
 
+def upload_archive_uri(user_id: int | None, filename: str) -> str:
+    _require_r2()
+    owner = str(user_id or "shared")
+    safe_name = _safe_storage_name(filename)
+    key = _key_join(settings.R2_UPLOAD_PREFIX, owner, uuid.uuid4().hex, safe_name)
+    return f"r2://{settings.R2_BUCKET}/{key}"
+
+
 def join_uri(base_uri: str, relative_path: str | Path) -> str:
     bucket, key = _parse_r2_uri(base_uri)
     rel = str(relative_path).replace("\\", "/").lstrip("/")
@@ -141,6 +150,32 @@ def upload_directory(local_dir: Path, root_uri: str) -> None:
         client.upload_file(str(file_path), bucket, _key_join(base_key, rel))
 
 
+def download_file(uri: str, local_path: Path) -> None:
+    if not is_r2_uri(uri):
+        source = Path(uri)
+        if not source.exists():
+            raise FileNotFoundError(f"Missing file: {source}")
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, local_path)
+        return
+
+    client = get_r2_client()
+    bucket, key = _parse_r2_uri(uri)
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    client.download_file(bucket, key, str(local_path))
+
+
+def delete_object(uri: str) -> None:
+    if not is_r2_uri(uri):
+        path = Path(uri)
+        if path.exists():
+            path.unlink()
+        return
+    client = get_r2_client()
+    bucket, key = _parse_r2_uri(uri)
+    client.delete_object(Bucket=bucket, Key=key)
+
+
 def delete_prefix(root_uri: str) -> None:
     if not is_r2_uri(root_uri):
         return
@@ -153,6 +188,58 @@ def delete_prefix(root_uri: str) -> None:
             chunk = objects[chunk_start:chunk_start + 1000]
             if chunk:
                 client.delete_objects(Bucket=bucket, Delete={"Objects": chunk})
+
+
+def create_multipart_upload(uri: str, content_type: str = "application/octet-stream") -> str:
+    if not is_r2_uri(uri):
+        raise ValueError("Multipart upload is only supported for R2 URIs")
+    client = get_r2_client()
+    bucket, key = _parse_r2_uri(uri)
+    result = client.create_multipart_upload(Bucket=bucket, Key=key, ContentType=content_type)
+    return result["UploadId"]
+
+
+def presign_upload_part(uri: str, upload_id: str, part_number: int, expires_in: int | None = None) -> str:
+    if not is_r2_uri(uri):
+        raise ValueError("Multipart upload is only supported for R2 URIs")
+    client = get_r2_client()
+    bucket, key = _parse_r2_uri(uri)
+    return client.generate_presigned_url(
+        "upload_part",
+        Params={
+            "Bucket": bucket,
+            "Key": key,
+            "UploadId": upload_id,
+            "PartNumber": part_number,
+        },
+        ExpiresIn=expires_in or settings.R2_SIGNED_URL_TTL_SECONDS,
+    )
+
+
+def complete_multipart_upload(uri: str, upload_id: str, parts: list[dict[str, int | str]]) -> None:
+    if not is_r2_uri(uri):
+        raise ValueError("Multipart upload is only supported for R2 URIs")
+    client = get_r2_client()
+    bucket, key = _parse_r2_uri(uri)
+    client.complete_multipart_upload(
+        Bucket=bucket,
+        Key=key,
+        UploadId=upload_id,
+        MultipartUpload={
+            "Parts": [
+                {"PartNumber": int(part["PartNumber"]), "ETag": str(part["ETag"])}
+                for part in sorted(parts, key=lambda item: int(item["PartNumber"]))
+            ]
+        },
+    )
+
+
+def abort_multipart_upload(uri: str, upload_id: str) -> None:
+    if not is_r2_uri(uri):
+        raise ValueError("Multipart upload is only supported for R2 URIs")
+    client = get_r2_client()
+    bucket, key = _parse_r2_uri(uri)
+    client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
 
 
 def presigned_url(uri: str, expires_in: int | None = None) -> str:

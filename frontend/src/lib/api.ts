@@ -15,10 +15,64 @@ export const ASSET_BASE = rawAssetBase
   ? rawAssetBase.replace(/\/+$/, '')
   : API_BASE
 
+export interface DatasetUploadJob {
+  id: number
+  dataset_name: string
+  source_filename: string
+  status: 'initiated' | 'uploaded' | 'processing' | 'done' | 'error' | 'aborted'
+  progress: number
+  dataset_id: number | null
+  error_message: string | null
+  part_size_bytes: number
+  total_parts: number
+  created_at: string
+  updated_at: string
+}
+
+export interface DatasetZipUploadProgress {
+  phase: 'starting' | 'uploading' | 'processing' | 'done'
+  uploadPercent: number
+  ingestPercent: number
+  status: DatasetUploadJob['status'] | 'uploading'
+}
+
 export function resolveAssetUrl(path: string) {
   if (/^https?:\/\//i.test(path)) return path
   if (!ASSET_BASE) return path
   return `${ASSET_BASE}${path.startsWith('/') ? path : `/${path}`}`
+}
+
+function uploadPartToPresignedUrl(
+  url: string,
+  blob: Blob,
+  onProgress?: (loaded: number) => void,
+) {
+  return new Promise<string>((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    let lastLoaded = 0
+
+    xhr.open('PUT', url)
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) return
+      const delta = event.loaded - lastLoaded
+      lastLoaded = event.loaded
+      if (delta > 0) onProgress?.(delta)
+    }
+    xhr.onload = () => {
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new Error(`Part upload failed with status ${xhr.status}`))
+        return
+      }
+      const etag = xhr.getResponseHeader('ETag')?.replace(/^"(.*)"$/, '$1')
+      if (!etag) {
+        reject(new Error('Missing ETag on upload response. Configure R2 CORS to expose the ETag header.'))
+        return
+      }
+      resolve(etag)
+    }
+    xhr.onerror = () => reject(new Error('Part upload failed'))
+    xhr.send(blob)
+  })
 }
 
 export const api = axios.create({
@@ -68,6 +122,78 @@ export const datasetsApi = {
     form.append('file', file)
     form.append('name', name)
     return api.post('/datasets/upload', form, { timeout: 300_000 }).then((r) => r.data)
+  },
+  uploadZipDirect: async (
+    file: File,
+    name: string,
+    onProgress?: (progress: DatasetZipUploadProgress) => void,
+  ) => {
+    const init = await api.post('/datasets/upload-jobs/init', {
+      dataset_name: name,
+      filename: file.name,
+      file_size: file.size,
+      content_type: file.type || 'application/zip',
+    })
+    const job = init.data as DatasetUploadJob
+    const partSize = Math.max(job.part_size_bytes, 5 * 1024 * 1024)
+    const totalParts = Math.max(job.total_parts, 1)
+    const completedParts: Array<{ part_number: number; etag: string }> = []
+    let uploadedBytes = 0
+
+    onProgress?.({ phase: 'starting', uploadPercent: 0, ingestPercent: 0, status: job.status })
+
+    for (let partNumber = 1; partNumber <= totalParts; partNumber += 1) {
+      const start = (partNumber - 1) * partSize
+      const end = Math.min(start + partSize, file.size)
+      const chunk = file.slice(start, end)
+
+      const partResp = await api.post(`/datasets/upload-jobs/${job.id}/parts`, { part_number: partNumber })
+      const etag = await uploadPartToPresignedUrl(partResp.data.url, chunk, (delta) => {
+        uploadedBytes += delta
+        onProgress?.({
+          phase: 'uploading',
+          uploadPercent: Math.min(100, Math.round((uploadedBytes / file.size) * 100)),
+          ingestPercent: 0,
+          status: 'uploading',
+        })
+      })
+      uploadedBytes = end
+      onProgress?.({
+        phase: 'uploading',
+        uploadPercent: Math.min(100, Math.round((uploadedBytes / file.size) * 100)),
+        ingestPercent: 0,
+        status: 'uploading',
+      })
+      completedParts.push({ part_number: partNumber, etag })
+    }
+
+    const complete = await api.post(`/datasets/upload-jobs/${job.id}/complete`, { parts: completedParts })
+    let currentJob = complete.data as DatasetUploadJob
+
+    while (!['done', 'error', 'aborted'].includes(currentJob.status)) {
+      onProgress?.({
+        phase: 'processing',
+        uploadPercent: 100,
+        ingestPercent: currentJob.progress,
+        status: currentJob.status,
+      })
+      await new Promise((resolve) => setTimeout(resolve, 2000))
+      const statusResp = await api.get(`/datasets/upload-jobs/${job.id}`)
+      currentJob = statusResp.data as DatasetUploadJob
+    }
+
+    if (currentJob.status !== 'done') {
+      throw new Error(currentJob.error_message || 'Dataset ingest failed')
+    }
+
+    onProgress?.({
+      phase: 'done',
+      uploadPercent: 100,
+      ingestPercent: 100,
+      status: currentJob.status,
+    })
+
+    return currentJob
   },
   uploadFolder: (files: File[] | FileList, name?: string) => {
     const form = new FormData()

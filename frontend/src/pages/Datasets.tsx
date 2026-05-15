@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Database, Upload, FolderOpen, Merge, Zap, Trash2, Edit2, Check, X, CloudDownload, ChevronLeft, ChevronRight, Search, Download } from 'lucide-react' // eslint-disable-line
 import { datasetsApi, qaApi } from '@/lib/api'
+import type { DatasetZipUploadProgress } from '@/lib/api'
 import { useAppStore } from '@/store'
 import { Dataset } from '@/types'
 import { Button } from '@/components/ui/button'
@@ -62,14 +63,18 @@ const activateMut = useMutation({
   })
 
   const uploadMut = useMutation({
-    mutationFn: ({ file, name }: { file: File; name: string }) => datasetsApi.upload(file, name),
+    mutationFn: ({ file, name }: { file: File; name: string }) => datasetsApi.uploadZipDirect(file, name, setZipUploadProgress),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['datasets'] })
       setShowUpload(false)
       setUploadFile(null)
+      setZipUploadProgress(null)
       toast.success('Dataset uploaded')
     },
-    onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Upload failed'),
+    onError: (e: unknown) => {
+      setZipUploadProgress(null)
+      toast.error((e as { response?: { data?: { detail?: string }, message?: string } })?.response?.data?.detail || (e as Error)?.message || 'Upload failed')
+    },
   })
 
   const [dsPage, setDsPage] = useState(1)
@@ -80,6 +85,7 @@ const activateMut = useMutation({
   const [mergeName, setMergeName] = useState('')
   const [showUpload, setShowUpload] = useState(false)
   const [uploadFile, setUploadFile] = useState<File | null>(null)
+  const [zipUploadProgress, setZipUploadProgress] = useState<DatasetZipUploadProgress | null>(null)
   const [folderSelection, setFolderSelection] = useState<{ name: string; files: File[] } | null>(null)
   const [sourceFilter, setSourceFilter] = useState('')
   const [nameSearch, setNameSearch] = useState('')
@@ -122,6 +128,7 @@ const activateMut = useMutation({
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0] ?? null
     setUploadFile(f)
+    setZipUploadProgress(null)
     if (f) setShowUpload(true)
   }
 
@@ -200,7 +207,7 @@ const activateMut = useMutation({
           <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} style={{ overflow: 'hidden', marginBottom: 18 }}>
             <div style={{ borderRadius: 14, padding: '20px 22px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.1)', position: 'relative' }}>
               <button
-                onClick={() => { setUploadFile(null); setShowUpload(false); if (fileInputRef.current) fileInputRef.current.value = '' }}
+                onClick={() => { setUploadFile(null); setShowUpload(false); setZipUploadProgress(null); if (fileInputRef.current) fileInputRef.current.value = '' }}
                 style={{ position: 'absolute', top: 10, right: 10, background: 'none', border: 'none', color: 'rgba(255,255,255,0.25)', cursor: 'pointer', padding: 4, display: 'flex', borderRadius: 4, transition: 'color 0.15s' }}
                 onMouseEnter={(e) => (e.currentTarget.style.color = '#fff')}
                 onMouseLeave={(e) => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}>
@@ -215,6 +222,30 @@ const activateMut = useMutation({
                   <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', margin: '4px 0 0' }}>
                     {(uploadFile.size / 1024 / 1024).toFixed(1)} MB · imports as <span style={{ color: 'rgba(255,255,255,0.6)', fontWeight: 500 }}>{autoName}</span>
                   </p>
+                  {zipUploadProgress && (
+                    <div style={{ marginTop: 10 }}>
+                      <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.45)', margin: '0 0 6px' }}>
+                        {zipUploadProgress.phase === 'uploading'
+                          ? `Uploading to R2... ${zipUploadProgress.uploadPercent}%`
+                          : zipUploadProgress.phase === 'processing'
+                            ? `Ingesting dataset... ${zipUploadProgress.ingestPercent}%`
+                            : zipUploadProgress.phase === 'done'
+                              ? 'Upload complete'
+                              : 'Preparing upload...'}
+                      </p>
+                      <div style={{ width: '100%', height: 6, borderRadius: 999, background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
+                        <div
+                          style={{
+                            width: `${zipUploadProgress.phase === 'processing' || zipUploadProgress.phase === 'done' ? 100 : zipUploadProgress.uploadPercent}%`,
+                            height: '100%',
+                            background: '#fff',
+                            opacity: zipUploadProgress.phase === 'processing' ? 0.65 : 0.9,
+                            transition: 'width 0.2s ease',
+                          }}
+                        />
+                      </div>
+                    </div>
+                  )}
                 </div>
                 <Button size="sm" onClick={() => uploadMut.mutate({ file: uploadFile, name: autoName })} loading={uploadMut.isPending}>
                   <Upload className="w-3.5 h-3.5" /> Upload

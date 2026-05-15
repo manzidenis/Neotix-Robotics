@@ -87,3 +87,21 @@ class ReplayJob(Base):
     error_message = Column(Text, nullable=True)
     created_at    = Column(DateTime, default=_now)
     updated_at    = Column(DateTime, default=_now, onupdate=_now)
+
+
+class DatasetUploadJob(Base):
+    __tablename__ = "dataset_upload_jobs"
+
+    id             = Column(Integer, primary_key=True, index=True)
+    user_id        = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    dataset_name   = Column(String(255), nullable=False)
+    source_filename = Column(String(512), nullable=False)
+    source_path    = Column(Text, nullable=False)
+    upload_id      = Column(String(255), nullable=False)
+    file_size      = Column(Integer, default=0)
+    status         = Column(String(24), default="initiated", index=True)
+    progress       = Column(Float, default=0.0)
+    dataset_id     = Column(Integer, nullable=True)
+    error_message  = Column(Text, nullable=True)
+    created_at     = Column(DateTime, default=_now)
+    updated_at     = Column(DateTime, default=_now, onupdate=_now)

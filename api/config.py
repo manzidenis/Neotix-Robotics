@@ -37,8 +37,10 @@ class Settings:
     R2_BUCKET: str = os.getenv("R2_BUCKET", "")
     R2_DATASET_PREFIX: str = os.getenv("R2_DATASET_PREFIX", "datasets")
     R2_REPLAY_PREFIX: str = os.getenv("R2_REPLAY_PREFIX", "replays")
+    R2_UPLOAD_PREFIX: str = os.getenv("R2_UPLOAD_PREFIX", "uploads")
     R2_PUBLIC_DATASET_PREFIX: str = os.getenv("R2_PUBLIC_DATASET_PREFIX", "")
     R2_SIGNED_URL_TTL_SECONDS: int = int(os.getenv("R2_SIGNED_URL_TTL_SECONDS", "3600"))
+    R2_MULTIPART_PART_SIZE_MB: int = int(os.getenv("R2_MULTIPART_PART_SIZE_MB", "32"))
     PUBLIC_DEMO_DATASET_NAMES: list[str] = _parse_csv(os.getenv("PUBLIC_DEMO_DATASET_NAMES", "ball_to_cup,dirty_towels"))
 
     # CORS origins (comma-separated, or * for all)

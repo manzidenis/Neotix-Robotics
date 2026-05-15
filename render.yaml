@@ -23,7 +23,11 @@ services:
         sync: false
       - key: R2_BUCKET
         sync: false
+      - key: R2_UPLOAD_PREFIX
+        value: uploads
       - key: R2_PUBLIC_DATASET_PREFIX
         value: public-data
+      - key: R2_MULTIPART_PART_SIZE_MB
+        value: "32"
       - key: PUBLIC_DEMO_DATASET_NAMES
         value: ball_to_cup,dirty_towels

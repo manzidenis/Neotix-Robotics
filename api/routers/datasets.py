@@ -1,7 +1,9 @@
 import json
+import math
 import shutil
 import tempfile
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -9,20 +11,29 @@ from sqlalchemy.orm import Session
 
 from api.activity_logger import log_activity
 from api.config import settings
-from api.database import get_db
+from api.database import SessionLocal, get_db
 from api.deps import get_current_user
-from api.models import Dataset, EpisodeRecord, User
+from api.models import Dataset, DatasetUploadJob, EpisodeRecord, User
 from api.storage import (
+    abort_multipart_upload,
+    complete_multipart_upload,
+    create_multipart_upload,
     dataset_root_uri,
     delete_prefix,
+    delete_object,
+    download_file,
     is_r2_uri,
     join_uri,
+    object_exists,
+    presign_upload_part,
     r2_enabled,
     read_text,
+    upload_archive_uri,
     upload_directory,
 )
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
+_ingest_executor = ThreadPoolExecutor(max_workers=2)
 
 
 def _resolve_storage_path(root: str | Path, relative_path: str) -> str | Path:
@@ -221,6 +232,82 @@ def _dataset_out(ds: Dataset) -> dict:
     }
 
 
+def _upload_job_out(job: DatasetUploadJob) -> dict:
+    part_size_bytes = max(5, settings.R2_MULTIPART_PART_SIZE_MB) * 1024 * 1024
+    total_parts = max(1, math.ceil((job.file_size or 0) / part_size_bytes)) if job.file_size else 1
+    return {
+        "id": job.id,
+        "dataset_name": job.dataset_name,
+        "source_filename": job.source_filename,
+        "status": job.status,
+        "progress": round(job.progress * 100),
+        "dataset_id": job.dataset_id,
+        "error_message": job.error_message,
+        "part_size_bytes": part_size_bytes,
+        "total_parts": total_parts,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+    }
+
+
+def _run_dataset_ingest(job_id: int) -> None:
+    db = SessionLocal()
+    temp_root: Path | None = None
+    try:
+        job = db.query(DatasetUploadJob).filter(DatasetUploadJob.id == job_id).first()
+        if not job:
+            return
+
+        job.status = "processing"
+        job.progress = 0.05
+        job.error_message = None
+        db.commit()
+
+        if db.query(Dataset).filter(Dataset.name == job.dataset_name, Dataset.user_id == job.user_id).first():
+            raise RuntimeError(f"Dataset '{job.dataset_name}' already exists")
+
+        temp_root = Path(tempfile.mkdtemp(prefix="neotix_ingest_"))
+        archive_path = temp_root / job.source_filename
+        download_file(job.source_path, archive_path)
+
+        job.progress = 0.25
+        db.commit()
+
+        extract_dir = temp_root / "dataset"
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with zipfile.ZipFile(archive_path) as zf:
+                zf.extractall(extract_dir)
+        except zipfile.BadZipFile as exc:
+            raise RuntimeError("Uploaded file is not a valid ZIP archive") from exc
+
+        job.progress = 0.55
+        db.commit()
+
+        ds = _persist_dataset_directory(extract_dir, job.dataset_name, db, job.user_id)
+        job.progress = 0.9
+        db.commit()
+
+        log_activity(db, db.query(User).filter(User.id == job.user_id).first(), "upload_dataset", f"Uploaded '{job.dataset_name}'", dataset_id=ds.id)
+        job.dataset_id = ds.id
+        job.status = "done"
+        job.progress = 1.0
+        db.commit()
+
+        delete_object(job.source_path)
+    except Exception as exc:
+        db.rollback()
+        job = db.query(DatasetUploadJob).filter(DatasetUploadJob.id == job_id).first()
+        if job:
+            job.status = "error"
+            job.error_message = str(exc)
+            db.commit()
+    finally:
+        if temp_root is not None:
+            shutil.rmtree(temp_root, ignore_errors=True)
+        db.close()
+
+
 def _verify_dataset_owner(db: Session, dataset_id: int, user: User) -> Dataset:
     ds = db.query(Dataset).filter(Dataset.id == dataset_id, Dataset.user_id == user.id).first()
     if not ds:
@@ -363,6 +450,139 @@ async def upload_dataset_folder(
         return _dataset_out(ds)
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)
+
+
+@router.post("/upload-jobs/init")
+def init_dataset_upload_job(
+    body: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not r2_enabled():
+        raise HTTPException(status_code=400, detail="Direct uploads require R2 storage to be configured")
+
+    dataset_name = str(body.get("dataset_name", "")).strip()
+    filename = str(body.get("filename", "")).strip()
+    file_size = int(body.get("file_size", 0) or 0)
+    content_type = str(body.get("content_type", "")).strip() or "application/zip"
+
+    if not dataset_name:
+        raise HTTPException(status_code=422, detail="dataset_name is required")
+    if not filename.lower().endswith(".zip"):
+        raise HTTPException(status_code=422, detail="Only ZIP uploads are supported")
+    if file_size <= 0:
+        raise HTTPException(status_code=422, detail="file_size must be greater than 0")
+    if db.query(Dataset).filter(Dataset.name == dataset_name, Dataset.user_id == current_user.id).first():
+        raise HTTPException(status_code=409, detail=f"Dataset '{dataset_name}' already exists")
+
+    source_path = upload_archive_uri(current_user.id, filename)
+    upload_id = create_multipart_upload(source_path, content_type=content_type)
+    job = DatasetUploadJob(
+        user_id=current_user.id,
+        dataset_name=dataset_name,
+        source_filename=Path(filename).name,
+        source_path=source_path,
+        upload_id=upload_id,
+        file_size=file_size,
+        status="initiated",
+        progress=0.0,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    return _upload_job_out(job)
+
+
+@router.post("/upload-jobs/{job_id}/parts")
+def sign_dataset_upload_part(
+    job_id: int,
+    body: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    job = db.query(DatasetUploadJob).filter(DatasetUploadJob.id == job_id, DatasetUploadJob.user_id == current_user.id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Upload job not found")
+    if job.status != "initiated":
+        raise HTTPException(status_code=409, detail=f"Upload job is already {job.status}")
+
+    part_number = int(body.get("part_number", 0) or 0)
+    if part_number <= 0:
+        raise HTTPException(status_code=422, detail="part_number must be greater than 0")
+
+    return {"url": presign_upload_part(job.source_path, job.upload_id, part_number)}
+
+
+@router.post("/upload-jobs/{job_id}/complete")
+def complete_dataset_upload_job(
+    job_id: int,
+    body: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    job = db.query(DatasetUploadJob).filter(DatasetUploadJob.id == job_id, DatasetUploadJob.user_id == current_user.id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Upload job not found")
+    if job.status != "initiated":
+        raise HTTPException(status_code=409, detail=f"Upload job is already {job.status}")
+
+    raw_parts = body.get("parts", [])
+    if not raw_parts:
+        raise HTTPException(status_code=422, detail="parts are required to complete the upload")
+
+    parts: list[dict[str, int | str]] = []
+    for item in raw_parts:
+        try:
+            part_number = int(item["part_number"])
+            etag = str(item["etag"]).strip()
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=422, detail="Each part must include part_number and etag") from exc
+        if not etag:
+            raise HTTPException(status_code=422, detail="Each part must include a non-empty etag")
+        parts.append({"PartNumber": part_number, "ETag": etag})
+
+    complete_multipart_upload(job.source_path, job.upload_id, parts)
+    if not object_exists(job.source_path):
+        raise HTTPException(status_code=500, detail="Upload completed but the archive object could not be found")
+
+    job.status = "uploaded"
+    job.progress = 0.01
+    db.commit()
+
+    _ingest_executor.submit(_run_dataset_ingest, job.id)
+    db.refresh(job)
+    return _upload_job_out(job)
+
+
+@router.post("/upload-jobs/{job_id}/abort")
+def abort_dataset_upload_job(
+    job_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    job = db.query(DatasetUploadJob).filter(DatasetUploadJob.id == job_id, DatasetUploadJob.user_id == current_user.id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Upload job not found")
+    if job.status != "initiated":
+        raise HTTPException(status_code=409, detail=f"Cannot abort an upload job that is {job.status}")
+
+    abort_multipart_upload(job.source_path, job.upload_id)
+    job.status = "aborted"
+    job.error_message = "Cancelled by user"
+    db.commit()
+    return _upload_job_out(job)
+
+
+@router.get("/upload-jobs/{job_id}")
+def get_dataset_upload_job(
+    job_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    job = db.query(DatasetUploadJob).filter(DatasetUploadJob.id == job_id, DatasetUploadJob.user_id == current_user.id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Upload job not found")
+    return _upload_job_out(job)
 
 
 @router.get("/{dataset_id}")
