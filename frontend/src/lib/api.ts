@@ -47,6 +47,8 @@ const MAX_PARALLEL_PART_UPLOADS = 4
 const MAX_PARALLEL_FILE_UPLOADS = 6
 const FOLDER_PREPARE_BATCH_SIZE = 64
 const DATASET_CONTROL_TIMEOUT_MS = 300_000
+const R2_UPLOAD_REQUEST_TIMEOUT_MS = 900_000
+const MAX_R2_UPLOAD_RETRIES = 2
 
 export function resolveAssetUrl(path: string) {
   if (/^https?:\/\//i.test(path)) return path
@@ -59,11 +61,27 @@ function uploadBlobToPresignedUrl(
   blob: Blob,
   onProgress?: (loaded: number) => void,
 ) {
-  return new Promise<string>((resolve, reject) => {
+  const uploadOnce = () => new Promise<string>((resolve, reject) => {
     const xhr = new XMLHttpRequest()
     let lastLoaded = 0
+    let settled = false
+
+    const rollbackProgress = () => {
+      if (lastLoaded > 0) {
+        onProgress?.(-lastLoaded)
+        lastLoaded = 0
+      }
+    }
+
+    const fail = (message: string) => {
+      if (settled) return
+      settled = true
+      rollbackProgress()
+      reject(new Error(message))
+    }
 
     xhr.open('PUT', url)
+    xhr.timeout = R2_UPLOAD_REQUEST_TIMEOUT_MS
     xhr.upload.onprogress = (event) => {
       if (!event.lengthComputable) return
       const delta = event.loaded - lastLoaded
@@ -71,8 +89,9 @@ function uploadBlobToPresignedUrl(
       if (delta > 0) onProgress?.(delta)
     }
     xhr.onload = () => {
+      if (settled) return
       if (xhr.status < 200 || xhr.status >= 300) {
-        reject(new Error(`Upload failed with status ${xhr.status}`))
+        fail(`Upload failed with status ${xhr.status}`)
         return
       }
       if (blob.size > lastLoaded) {
@@ -81,14 +100,33 @@ function uploadBlobToPresignedUrl(
       }
       const etag = xhr.getResponseHeader('ETag')?.replace(/^"(.*)"$/, '$1')
       if (!etag) {
-        reject(new Error('Missing ETag on upload response. Configure R2 CORS to expose the ETag header.'))
+        fail('Missing ETag on upload response. Configure R2 CORS to expose the ETag header.')
         return
       }
+      settled = true
       resolve(etag)
     }
-    xhr.onerror = () => reject(new Error('Part upload failed'))
+    xhr.onerror = () => fail('Upload failed')
+    xhr.onabort = () => fail('Upload aborted')
+    xhr.ontimeout = () => fail('Upload timed out')
     xhr.send(blob)
   })
+
+  return (async () => {
+    let attempt = 0
+    let lastError: Error | null = null
+    while (attempt <= MAX_R2_UPLOAD_RETRIES) {
+      try {
+        return await uploadOnce()
+      } catch (error) {
+        lastError = error as Error
+        if (attempt === MAX_R2_UPLOAD_RETRIES) break
+        await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)))
+      }
+      attempt += 1
+    }
+    throw lastError ?? new Error('Upload failed')
+  })()
 }
 
 export const api = axios.create({
