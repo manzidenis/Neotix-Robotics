@@ -24,16 +24,23 @@ from api.storage import (
     download_file,
     is_r2_uri,
     join_uri,
+    open_zip,
     object_exists,
     presign_upload_part,
     r2_enabled,
     read_text,
     upload_archive_uri,
     upload_directory,
+    upload_fileobj,
 )
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 _ingest_executor = ThreadPoolExecutor(max_workers=2)
+
+
+def _temp_root() -> Path:
+    settings.TEMP_WORK_PATH.mkdir(parents=True, exist_ok=True)
+    return settings.TEMP_WORK_PATH
 
 
 def _resolve_storage_path(root: str | Path, relative_path: str) -> str | Path:
@@ -95,6 +102,24 @@ def _detect_dataset_root(root: Path) -> Path:
     raise ValueError(f"Not a valid LeRobot v2.1 dataset - missing meta/info.json: {root}")
 
 
+def _detect_dataset_root_in_archive(names: list[str]) -> PurePosixPath:
+    normalized = {
+        str(PurePosixPath(name.replace("\\", "/"))): PurePosixPath(name.replace("\\", "/"))
+        for name in names
+        if name and not name.endswith("/")
+    }
+    candidates: list[PurePosixPath] = []
+    for path in normalized.values():
+        if len(path.parts) >= 2 and path.parts[-2:] == ("meta", "info.json"):
+            candidates.append(path.parent.parent)
+
+    if not candidates:
+        raise ValueError("Not a valid LeRobot v2.1 dataset - missing meta/info.json in ZIP archive")
+
+    candidates.sort(key=lambda item: len(item.parts))
+    return candidates[0]
+
+
 def _cleanup_storage_path(path: str | Path) -> None:
     if is_r2_uri(path):
         delete_prefix(str(path))
@@ -118,6 +143,58 @@ def _persist_dataset_directory(local_dir: Path, name: str, db: Session, user_id:
         return _register_dataset(db, name, storage_path, user_id=user_id)
     except ValueError:
         _cleanup_storage_path(storage_path)
+        raise
+
+
+def _persist_dataset_archive(source_path: str, name: str, db: Session, user_id: int, progress_job: DatasetUploadJob | None = None) -> Dataset:
+    storage_path: str | Path = dataset_root_uri(user_id, name) if r2_enabled() else settings.DATASET_BASE_PATH / name
+    uploaded = False
+    try:
+        with open_zip(source_path) as zf:
+            file_infos = [info for info in zf.infolist() if not info.is_dir()]
+            archive_root = _detect_dataset_root_in_archive([info.filename for info in file_infos])
+            dataset_infos = [info for info in file_infos if PurePosixPath(info.filename.replace("\\", "/")).is_relative_to(archive_root)]
+            total_uncompressed = sum(max(0, info.file_size) for info in dataset_infos) or 1
+            processed_uncompressed = 0
+            uploaded = True
+
+            if is_r2_uri(storage_path):
+                for info in dataset_infos:
+                    archive_member = PurePosixPath(info.filename.replace("\\", "/"))
+                    relative_path = archive_member.relative_to(archive_root)
+                    target_uri = join_uri(str(storage_path), relative_path.as_posix())
+                    with zf.open(info) as member_stream:
+                        upload_fileobj(member_stream, target_uri)
+                    processed_uncompressed += max(0, info.file_size)
+                    if progress_job is not None:
+                        progress_job.progress = 0.3 + (processed_uncompressed / total_uncompressed) * 0.55
+                        db.commit()
+            else:
+                actual_root = Path(storage_path)
+                if actual_root.exists():
+                    shutil.rmtree(actual_root, ignore_errors=True)
+                actual_root.mkdir(parents=True, exist_ok=True)
+                for info in dataset_infos:
+                    archive_member = PurePosixPath(info.filename.replace("\\", "/"))
+                    relative_path = Path(*archive_member.relative_to(archive_root).parts)
+                    target_path = actual_root / relative_path
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(info) as member_stream, open(target_path, "wb") as dest:
+                        shutil.copyfileobj(member_stream, dest, length=1024 * 1024)
+                    processed_uncompressed += max(0, info.file_size)
+                    if progress_job is not None:
+                        progress_job.progress = 0.3 + (processed_uncompressed / total_uncompressed) * 0.55
+                        db.commit()
+
+        uploaded = True
+        return _register_dataset(db, name, storage_path, user_id=user_id)
+    except ValueError:
+        if uploaded:
+            _cleanup_storage_path(storage_path)
+        raise
+    except Exception:
+        if uploaded:
+            _cleanup_storage_path(storage_path)
         raise
 
 
@@ -266,25 +343,34 @@ def _run_dataset_ingest(job_id: int) -> None:
         if db.query(Dataset).filter(Dataset.name == job.dataset_name, Dataset.user_id == job.user_id).first():
             raise RuntimeError(f"Dataset '{job.dataset_name}' already exists")
 
-        temp_root = Path(tempfile.mkdtemp(prefix="neotix_ingest_"))
-        archive_path = temp_root / job.source_filename
-        download_file(job.source_path, archive_path)
+        if is_r2_uri(job.source_path):
+            job.progress = 0.2
+            db.commit()
+            try:
+                ds = _persist_dataset_archive(job.source_path, job.dataset_name, db, job.user_id, progress_job=job)
+            except zipfile.BadZipFile as exc:
+                raise RuntimeError("Uploaded file is not a valid ZIP archive") from exc
+        else:
+            temp_root = Path(tempfile.mkdtemp(prefix="neotix_ingest_", dir=_temp_root()))
+            archive_path = temp_root / job.source_filename
+            download_file(job.source_path, archive_path)
 
-        job.progress = 0.25
-        db.commit()
+            job.progress = 0.25
+            db.commit()
 
-        extract_dir = temp_root / "dataset"
-        extract_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            with zipfile.ZipFile(archive_path) as zf:
-                zf.extractall(extract_dir)
-        except zipfile.BadZipFile as exc:
-            raise RuntimeError("Uploaded file is not a valid ZIP archive") from exc
+            extract_dir = temp_root / "dataset"
+            extract_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                with zipfile.ZipFile(archive_path) as zf:
+                    zf.extractall(extract_dir)
+            except zipfile.BadZipFile as exc:
+                raise RuntimeError("Uploaded file is not a valid ZIP archive") from exc
 
-        job.progress = 0.55
-        db.commit()
+            job.progress = 0.55
+            db.commit()
 
-        ds = _persist_dataset_directory(extract_dir, job.dataset_name, db, job.user_id)
+            ds = _persist_dataset_directory(extract_dir, job.dataset_name, db, job.user_id)
+
         job.progress = 0.9
         db.commit()
 
@@ -374,7 +460,7 @@ async def upload_dataset(
     if db.query(Dataset).filter(Dataset.name == name, Dataset.user_id == current_user.id).first():
         raise HTTPException(status_code=409, detail=f"Dataset '{name}' already exists")
 
-    temp_root = Path(tempfile.mkdtemp(prefix="neotix_upload_"))
+    temp_root = Path(tempfile.mkdtemp(prefix="neotix_upload_", dir=_temp_root()))
     zip_path = temp_root / "upload.zip"
     try:
         with open(zip_path, "wb") as f:
@@ -414,7 +500,7 @@ async def upload_dataset_folder(
     if not files:
         raise HTTPException(status_code=422, detail="No files were uploaded")
 
-    temp_root = Path(tempfile.mkdtemp(prefix="neotix_folder_upload_"))
+    temp_root = Path(tempfile.mkdtemp(prefix="neotix_folder_upload_", dir=_temp_root()))
     staging_root = temp_root / "dataset"
     staging_root.mkdir(parents=True, exist_ok=True)
 

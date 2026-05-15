@@ -1,15 +1,23 @@
 from __future__ import annotations
 
+import io
 import os
 import shutil
 import tempfile
+import zipfile
 import uuid
+from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
-from typing import Iterator
+from typing import BinaryIO, Iterator
 from urllib.parse import urlparse
 
 from api.config import settings
+
+
+def _temp_root() -> Path:
+    settings.TEMP_WORK_PATH.mkdir(parents=True, exist_ok=True)
+    return settings.TEMP_WORK_PATH
 
 
 def r2_enabled() -> bool:
@@ -133,6 +141,19 @@ def upload_file(local_path: Path, uri: str) -> None:
     client.upload_file(str(local_path), bucket, key)
 
 
+def upload_fileobj(fileobj: BinaryIO, uri: str) -> None:
+    if not is_r2_uri(uri):
+        dest = Path(uri)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with open(dest, "wb") as out:
+            shutil.copyfileobj(fileobj, out, length=1024 * 1024)
+        return
+
+    client = get_r2_client()
+    bucket, key = _parse_r2_uri(uri)
+    client.upload_fileobj(fileobj, bucket, key)
+
+
 def upload_directory(local_dir: Path, root_uri: str) -> None:
     if not is_r2_uri(root_uri):
         dest = Path(root_uri)
@@ -254,6 +275,111 @@ def presigned_url(uri: str, expires_in: int | None = None) -> str:
     )
 
 
+class _R2SeekableReader(io.RawIOBase):
+    def __init__(self, uri: str, chunk_size: int = 8 * 1024 * 1024, max_cached_chunks: int = 8):
+        if not is_r2_uri(uri):
+            raise ValueError("Seekable R2 reader requires an R2 URI")
+        self._client = get_r2_client()
+        self._bucket, self._key = _parse_r2_uri(uri)
+        metadata = self._client.head_object(Bucket=self._bucket, Key=self._key)
+        self._size = int(metadata["ContentLength"])
+        self._pos = 0
+        self._chunk_size = max(1024 * 1024, chunk_size)
+        self._max_cached_chunks = max(2, max_cached_chunks)
+        self._cache: OrderedDict[int, bytes] = OrderedDict()
+        self._closed = False
+
+    def close(self) -> None:
+        self._cache.clear()
+        self._closed = True
+        super().close()
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self._pos
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        if whence == io.SEEK_SET:
+            new_pos = offset
+        elif whence == io.SEEK_CUR:
+            new_pos = self._pos + offset
+        elif whence == io.SEEK_END:
+            new_pos = self._size + offset
+        else:
+            raise ValueError(f"Unsupported whence: {whence}")
+
+        self._pos = max(0, min(new_pos, self._size))
+        return self._pos
+
+    def read(self, size: int = -1) -> bytes:
+        if self._closed:
+            raise ValueError("I/O operation on closed file")
+        if size is None or size < 0:
+            size = self._size - self._pos
+        if size <= 0 or self._pos >= self._size:
+            return b""
+
+        end_pos = min(self._size, self._pos + size)
+        remaining = end_pos - self._pos
+        cursor = self._pos
+        chunks: list[bytes] = []
+
+        while remaining > 0:
+            chunk_index = cursor // self._chunk_size
+            chunk = self._get_chunk(chunk_index)
+            chunk_offset = cursor % self._chunk_size
+            take = min(len(chunk) - chunk_offset, remaining)
+            if take <= 0:
+                break
+            chunks.append(chunk[chunk_offset:chunk_offset + take])
+            cursor += take
+            remaining -= take
+
+        self._pos = cursor
+        return b"".join(chunks)
+
+    def _get_chunk(self, chunk_index: int) -> bytes:
+        cached = self._cache.get(chunk_index)
+        if cached is not None:
+            self._cache.move_to_end(chunk_index)
+            return cached
+
+        start = chunk_index * self._chunk_size
+        end = min(self._size - 1, start + self._chunk_size - 1)
+        response = self._client.get_object(
+            Bucket=self._bucket,
+            Key=self._key,
+            Range=f"bytes={start}-{end}",
+        )
+        data = response["Body"].read()
+        self._cache[chunk_index] = data
+        self._cache.move_to_end(chunk_index)
+        while len(self._cache) > self._max_cached_chunks:
+            self._cache.popitem(last=False)
+        return data
+
+
+@contextmanager
+def open_zip(uri: str) -> Iterator[zipfile.ZipFile]:
+    if not is_r2_uri(uri):
+        with zipfile.ZipFile(uri) as zf:
+            yield zf
+        return
+
+    reader = _R2SeekableReader(uri)
+    buffered = io.BufferedReader(reader, buffer_size=8 * 1024 * 1024)
+    try:
+        with zipfile.ZipFile(buffered) as zf:
+            yield zf
+    finally:
+        buffered.close()
+
+
 @contextmanager
 def materialize_dataset(root_path: str | Path) -> Iterator[Path]:
     if not is_r2_uri(root_path):
@@ -262,7 +388,7 @@ def materialize_dataset(root_path: str | Path) -> Iterator[Path]:
 
     client = get_r2_client()
     bucket, base_key = _parse_r2_uri(str(root_path))
-    tmp_dir = Path(tempfile.mkdtemp(prefix="neotix_r2_dataset_"))
+    tmp_dir = Path(tempfile.mkdtemp(prefix="neotix_r2_dataset_", dir=_temp_root()))
     try:
         paginator = client.get_paginator("list_objects_v2")
         found = False
@@ -282,7 +408,7 @@ def materialize_dataset(root_path: str | Path) -> Iterator[Path]:
 
 @contextmanager
 def materialize_files(root_path: str | Path, relative_paths: list[str | Path]) -> Iterator[Path]:
-    tmp_dir = Path(tempfile.mkdtemp(prefix="neotix_storage_files_"))
+    tmp_dir = Path(tempfile.mkdtemp(prefix="neotix_storage_files_", dir=_temp_root()))
     try:
         if is_r2_uri(root_path):
             client = get_r2_client()

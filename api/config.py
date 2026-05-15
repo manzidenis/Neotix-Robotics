@@ -29,6 +29,7 @@ class Settings:
 
     DATABASE_URL: str = _normalize_database_url(os.getenv("DATABASE_URL", "sqlite:///./neotix.db"))
     DATASET_BASE_PATH: Path = Path(os.getenv("DATASET_BASE_PATH", "data"))
+    TEMP_WORK_PATH: Path = Path(os.getenv("TEMP_WORK_PATH", str(DATASET_BASE_PATH / ".work")))
     MODELS_PATH: Path = Path("models/i2rt_yam")
     REPLAY_OUTPUT_PATH: Path = Path(os.getenv("REPLAY_OUTPUT_PATH", str(DATASET_BASE_PATH / "replays")))
     R2_ACCOUNT_ID: str = os.getenv("R2_ACCOUNT_ID", "")
