@@ -45,6 +45,7 @@ export interface DatasetFolderUploadProgress {
 
 const MAX_PARALLEL_PART_UPLOADS = 4
 const MAX_PARALLEL_FILE_UPLOADS = 6
+const DATASET_CONTROL_TIMEOUT_MS = 300_000
 
 export function resolveAssetUrl(path: string) {
   if (/^https?:\/\//i.test(path)) return path
@@ -147,7 +148,7 @@ export const datasetsApi = {
       filename: file.name,
       file_size: file.size,
       content_type: file.type || 'application/zip',
-    })
+    }, { timeout: DATASET_CONTROL_TIMEOUT_MS })
     const job = init.data as DatasetUploadJob
     const partSize = Math.max(job.part_size_bytes, 5 * 1024 * 1024)
     const totalParts = Math.max(job.total_parts, 1)
@@ -175,7 +176,11 @@ export const datasetsApi = {
         const end = Math.min(start + partSize, file.size)
         const chunk = file.slice(start, end)
 
-        const partResp = await api.post(`/datasets/upload-jobs/${job.id}/parts`, { part_number: partNumber })
+        const partResp = await api.post(
+          `/datasets/upload-jobs/${job.id}/parts`,
+          { part_number: partNumber },
+          { timeout: DATASET_CONTROL_TIMEOUT_MS },
+        )
         const etag = await uploadBlobToPresignedUrl(partResp.data.url, chunk, (delta) => {
           uploadedBytes += delta
           emitUploadProgress()
@@ -189,7 +194,11 @@ export const datasetsApi = {
       Array.from({ length: Math.min(MAX_PARALLEL_PART_UPLOADS, totalParts) }, () => uploadNextPart()),
     )
 
-    const complete = await api.post(`/datasets/upload-jobs/${job.id}/complete`, { parts: completedParts })
+    const complete = await api.post(
+      `/datasets/upload-jobs/${job.id}/complete`,
+      { parts: completedParts },
+      { timeout: DATASET_CONTROL_TIMEOUT_MS },
+    )
     let currentJob = complete.data as DatasetUploadJob
 
     while (!['done', 'error', 'aborted'].includes(currentJob.status)) {
@@ -200,7 +209,7 @@ export const datasetsApi = {
         status: currentJob.status,
       })
       await new Promise((resolve) => setTimeout(resolve, 2000))
-      const statusResp = await api.get(`/datasets/upload-jobs/${job.id}`)
+      const statusResp = await api.get(`/datasets/upload-jobs/${job.id}`, { timeout: DATASET_CONTROL_TIMEOUT_MS })
       currentJob = statusResp.data as DatasetUploadJob
     }
 
@@ -235,14 +244,18 @@ export const datasetsApi = {
 
     onProgress?.({ phase: 'starting', uploadPercent: 0, filesUploaded: 0, totalFiles: entries.length })
 
-    const prepare = await api.post('/datasets/folder-upload/prepare', {
-      dataset_name: name,
-      files: entries.map(({ file, relativePath }) => ({
-        relative_path: relativePath,
-        size: file.size,
-        content_type: file.type || 'application/octet-stream',
-      })),
-    })
+    const prepare = await api.post(
+      '/datasets/folder-upload/prepare',
+      {
+        dataset_name: name,
+        files: entries.map(({ file, relativePath }) => ({
+          relative_path: relativePath,
+          size: file.size,
+          content_type: file.type || 'application/octet-stream',
+        })),
+      },
+      { timeout: DATASET_CONTROL_TIMEOUT_MS },
+    )
 
     const urlByPath = new Map<string, string>(
       (prepare.data.uploads as Array<{ relative_path: string; url: string }>).map((item) => [item.relative_path, item.url]),
@@ -287,7 +300,11 @@ export const datasetsApi = {
       totalFiles: entries.length,
     })
 
-    const complete = await api.post('/datasets/folder-upload/complete', { dataset_name: name })
+    const complete = await api.post(
+      '/datasets/folder-upload/complete',
+      { dataset_name: name },
+      { timeout: DATASET_CONTROL_TIMEOUT_MS },
+    )
     onProgress?.({
       phase: 'done',
       uploadPercent: 100,
