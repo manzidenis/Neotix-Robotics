@@ -3,6 +3,7 @@ import { useAuthStore } from '@/store'
 
 const rawApiBase = (import.meta.env.VITE_API_BASE as string | undefined)?.trim()
 const rawWsBase = (import.meta.env.VITE_WS_BASE as string | undefined)?.trim()
+const rawAssetBase = (import.meta.env.VITE_ASSET_BASE as string | undefined)?.trim()
 
 export const API_BASE = rawApiBase ? rawApiBase.replace(/\/+$/, '') : ''
 export const WS_BASE = rawWsBase
@@ -10,6 +11,15 @@ export const WS_BASE = rawWsBase
   : API_BASE
     ? API_BASE.replace(/^http/i, 'ws')
     : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`
+export const ASSET_BASE = rawAssetBase
+  ? rawAssetBase.replace(/\/+$/, '')
+  : API_BASE
+
+export function resolveAssetUrl(path: string) {
+  if (/^https?:\/\//i.test(path)) return path
+  if (!ASSET_BASE) return path
+  return `${ASSET_BASE}${path.startsWith('/') ? path : `/${path}`}`
+}
 
 export const api = axios.create({
   baseURL: API_BASE,
@@ -58,6 +68,15 @@ export const datasetsApi = {
     form.append('file', file)
     form.append('name', name)
     return api.post('/datasets/upload', form, { timeout: 300_000 }).then((r) => r.data)
+  },
+  uploadFolder: (files: File[] | FileList, name?: string) => {
+    const form = new FormData()
+    for (const file of Array.from(files)) {
+      const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name
+      form.append('files', file, relativePath)
+    }
+    if (name?.trim()) form.append('name', name.trim())
+    return api.post('/datasets/upload-folder', form, { timeout: 300_000 }).then((r) => r.data)
   },
   rename: (id: number, name: string) =>
     api.patch(`/datasets/${id}`, { name }).then((r) => r.data),

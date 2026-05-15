@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Cpu, ArrowRight, X, AlertCircle, Play, Square, VolumeX, Volume2, ChevronRight } from 'lucide-react'
-import { authApi } from '@/lib/api'
+import { authApi, resolveAssetUrl } from '@/lib/api'
 import { useAuthStore, useAppStore } from '@/store'
 import { queryClient } from '@/queryClient'
 import { toast } from 'sonner'
@@ -133,13 +133,13 @@ function AuthModal({ onClose }: { onClose: () => void }) {
 const DEMOS = [
   {
     label: 'Ep #000',
-    env: '/data/ball_to_cup/videos/chunk-000/observation.images.env/episode_000000.mp4',
-    wrist: '/data/ball_to_cup/videos/chunk-000/observation.images.wrist/episode_000000.mp4',
+    env: resolveAssetUrl('/data/ball_to_cup/videos/chunk-000/observation.images.env/episode_000000.mp4'),
+    wrist: resolveAssetUrl('/data/ball_to_cup/videos/chunk-000/observation.images.wrist/episode_000000.mp4'),
   },
   {
     label: 'Ep #001',
-    env: '/data/ball_to_cup/videos/chunk-000/observation.images.env/episode_000001.mp4',
-    wrist: '/data/ball_to_cup/videos/chunk-000/observation.images.wrist/episode_000001.mp4',
+    env: resolveAssetUrl('/data/ball_to_cup/videos/chunk-000/observation.images.env/episode_000001.mp4'),
+    wrist: resolveAssetUrl('/data/ball_to_cup/videos/chunk-000/observation.images.wrist/episode_000001.mp4'),
   },
 ]
 
@@ -451,9 +451,9 @@ const DATASETS = [
     desc: 'Pick-and-place — robot picks a ball and drops it into a cup.',
     episodes: 456, fps: 30,
     videos: [
-      { src: '/data/ball_to_cup/videos/chunk-000/observation.images.env/episode_000000.mp4', label: 'ep_000 · env' },
-      { src: '/data/ball_to_cup/videos/chunk-000/observation.images.env/episode_000001.mp4', label: 'ep_001 · env' },
-      { src: '/data/ball_to_cup/videos/chunk-000/observation.images.wrist/episode_000000.mp4', label: 'ep_000 · wrist' },
+      { src: resolveAssetUrl('/data/ball_to_cup/videos/chunk-000/observation.images.env/episode_000000.mp4'), label: 'ep_000 · env' },
+      { src: resolveAssetUrl('/data/ball_to_cup/videos/chunk-000/observation.images.env/episode_000001.mp4'), label: 'ep_001 · env' },
+      { src: resolveAssetUrl('/data/ball_to_cup/videos/chunk-000/observation.images.wrist/episode_000000.mp4'), label: 'ep_000 · wrist' },
     ],
   },
   {
@@ -462,9 +462,9 @@ const DATASETS = [
     desc: 'Both arms coordinate to fold a crumpled towel flat on a surface.',
     episodes: 55, fps: 30,
     videos: [
-      { src: '/data/dirty_towels/videos/chunk-000/observation.images.env1/episode_000000.mp4', label: 'ep_000 · env1' },
-      { src: '/data/dirty_towels/videos/chunk-000/observation.images.wrist_left/episode_000000.mp4', label: 'ep_000 · wrist_l' },
-      { src: '/data/dirty_towels/videos/chunk-000/observation.images.wrist_right/episode_000000.mp4', label: 'ep_000 · wrist_r' },
+      { src: resolveAssetUrl('/data/dirty_towels/videos/chunk-000/observation.images.env1/episode_000000.mp4'), label: 'ep_000 · env1' },
+      { src: resolveAssetUrl('/data/dirty_towels/videos/chunk-000/observation.images.wrist_left/episode_000000.mp4'), label: 'ep_000 · wrist_l' },
+      { src: resolveAssetUrl('/data/dirty_towels/videos/chunk-000/observation.images.wrist_right/episode_000000.mp4'), label: 'ep_000 · wrist_r' },
     ],
   },
 ]

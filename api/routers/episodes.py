@@ -1,14 +1,17 @@
 import json
+from io import BytesIO
 from pathlib import Path
 
 import aiofiles
+import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from api.database import get_db
 from api.deps import get_current_user, get_current_user_flexible
 from api.models import Dataset, EpisodeRecord, User
+from api.storage import is_r2_uri, join_uri, object_exists, presigned_url, read_bytes
 
 router = APIRouter(prefix="/episodes", tags=["episodes"])
 
@@ -105,17 +108,23 @@ def get_episode(episode_id: int, db: Session = Depends(get_db), current_user: Us
 @router.get("/{episode_id}/data")
 def get_episode_data(episode_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     import numpy as np
-    import pandas as pd
 
     ep = _verify_episode_owner(db, episode_id, current_user)
 
     ds = db.query(Dataset).filter(Dataset.id == ep.dataset_id).first()
-    ds_path = Path(ds.path)
-    parquet = ds_path / "data" / "chunk-000" / f"episode_{ep.episode_index:06d}.parquet"
-    if not parquet.exists():
-        raise HTTPException(status_code=404, detail="Parquet file not found")
+    parquet_rel = f"data/chunk-000/episode_{ep.episode_index:06d}.parquet"
+    if is_r2_uri(ds.path):
+        parquet_uri = join_uri(ds.path, parquet_rel)
+        try:
+            df = pd.read_parquet(BytesIO(read_bytes(parquet_uri)))
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Parquet file not found")
+    else:
+        parquet = Path(ds.path) / parquet_rel
+        if not parquet.exists():
+            raise HTTPException(status_code=404, detail="Parquet file not found")
+        df = pd.read_parquet(parquet)
 
-    df = pd.read_parquet(parquet)
     states = np.stack(df["observation.state"].values).tolist()
     actions = np.stack(df["action"].values).tolist()
     timestamps = df["timestamp"].values.tolist()
@@ -133,12 +142,16 @@ async def stream_video(episode_id: int, camera: str, request: Request, db: Sessi
     ep = _verify_episode_owner(db, episode_id, current_user)
 
     ds = db.query(Dataset).filter(Dataset.id == ep.dataset_id).first()
-    ds_path = Path(ds.path)
-    video_path = (
-        ds_path / "videos" / "chunk-000"
-        / f"observation.images.{camera}"
-        / f"episode_{ep.episode_index:06d}.mp4"
+    video_rel = (
+        f"videos/chunk-000/observation.images.{camera}/episode_{ep.episode_index:06d}.mp4"
     )
+    if is_r2_uri(ds.path):
+        video_uri = join_uri(ds.path, video_rel)
+        if not object_exists(video_uri):
+            raise HTTPException(status_code=404, detail=f"Video not found for camera '{camera}'")
+        return RedirectResponse(presigned_url(video_uri), status_code=307)
+
+    video_path = Path(ds.path) / video_rel
     if not video_path.exists():
         raise HTTPException(status_code=404, detail=f"Video not found for camera '{camera}'")
 

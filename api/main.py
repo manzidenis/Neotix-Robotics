@@ -6,18 +6,16 @@ Run:
 """
 
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 
 from api.config import settings
 from api.database import init_db
 
 # Routers
-from api.routers import auth, datasets, episodes, qa, merge, activity, stats, simulator
+from api.routers import activity, assets, auth, datasets, episodes, merge, qa, simulator, stats
 
 
 @asynccontextmanager
@@ -55,11 +53,7 @@ async def server_error_handler(request: Request, exc):
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 
-data_dir = Path("data")
-if data_dir.exists():
-    app.mount("/data", StaticFiles(directory="data"), name="data")
-
-
+app.include_router(assets.router)
 app.include_router(auth.router)
 app.include_router(datasets.router)
 app.include_router(episodes.router)

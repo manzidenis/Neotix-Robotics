@@ -88,6 +88,7 @@ Open **`http://localhost:3000`** (or the port Vite prints). For **video/API** fe
 - Frontend: Vercel
 - Backend: Render free web service
 - Database: Neon free Postgres
+- Object storage: Cloudflare R2
 
 ---
 

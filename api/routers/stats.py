@@ -59,15 +59,26 @@ def list_tasks(db: Session = Depends(get_db), current_user: User = Depends(get_c
     import json
     from pathlib import Path
 
+    from api.storage import is_r2_uri, join_uri, read_text
+
     ds = db.query(Dataset).filter(Dataset.is_active == True, Dataset.user_id == current_user.id).first()  # noqa: E712
     if not ds:
         raise HTTPException(status_code=400, detail="No active dataset")
 
-    tasks_path = Path(ds.path) / "meta" / "tasks.jsonl"
     tasks = []
-    if tasks_path.exists():
-        with open(tasks_path) as f:
-            for line in f:
-                if line.strip():
-                    tasks.append(json.loads(line))
+    if is_r2_uri(ds.path):
+        try:
+            lines = read_text(join_uri(ds.path, "meta/tasks.jsonl")).splitlines()
+        except FileNotFoundError:
+            lines = []
+        for line in lines:
+            if line.strip():
+                tasks.append(json.loads(line))
+    else:
+        tasks_path = Path(ds.path) / "meta" / "tasks.jsonl"
+        if tasks_path.exists():
+            with open(tasks_path) as f:
+                for line in f:
+                    if line.strip():
+                        tasks.append(json.loads(line))
     return tasks

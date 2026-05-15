@@ -1,22 +1,38 @@
 """
-Part C — Live simulator (WebSocket) + async replay endpoints.
+Part C - Live simulator (WebSocket) + async replay endpoints.
 """
+
 import asyncio
 import json
+import shutil
 import struct
 import sys
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
+from io import BytesIO
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import RedirectResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
+from api.activity_logger import log_activity
 from api.config import settings
 from api.database import get_db
 from api.deps import get_current_user, get_current_user_flexible
 from api.models import Dataset, EpisodeRecord, ReplayJob, User
-from api.activity_logger import log_activity
+from api.storage import (
+    is_r2_uri,
+    join_uri,
+    materialize_files,
+    object_exists,
+    presigned_url,
+    read_bytes,
+    replay_object_uri,
+    r2_enabled,
+    upload_file,
+)
 
 _SIM_AVAILABLE = False
 _SIM_IMPORT_ERROR = ""
@@ -27,7 +43,7 @@ try:
     import numpy as np
 
     sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-    from tools.sim_replay import load_model, set_pose, render_frame, replay_episode  # noqa: E402
+    from tools.sim_replay import load_model, render_frame, replay_episode, set_pose  # noqa: E402
 
     _SIM_AVAILABLE = True
 except Exception as _exc:
@@ -37,18 +53,15 @@ except Exception as _exc:
 router = APIRouter(tags=["simulator"])
 _executor = ThreadPoolExecutor(max_workers=4)
 
-
-# WebSocket simulator
 DEFAULT_CAM = {"azimuth": 135.0, "elevation": -20.0, "distance": 1.5}
-
 STREAM_W = 960
 STREAM_H = 720
 STREAM_JPEG_QUALITY = 85
 
 
 def _load_model_streaming(bimanual: bool = False):
-    """Load MuJoCo model with lower resolution renderer for WebSocket streaming."""
     from tools.sim_replay import MODEL_PATH, MODEL_PATH_BIMANUAL
+
     path = MODEL_PATH_BIMANUAL if bimanual else MODEL_PATH
     if not path.exists():
         raise FileNotFoundError(f"YAM Pro model not found: {path}")
@@ -64,7 +77,7 @@ def _encode_frame_jpeg(rgb, quality: int = STREAM_JPEG_QUALITY) -> bytes:
 
 
 def _get_episode_states(episode_id: int, db: Session):
-    """Return (states ndarray, bimanual bool, total_frames int, error_msg str|None)."""
+    """Return (states ndarray, bimanual bool, total_frames int, error_msg|None)."""
     import pandas as pd
 
     ep = db.query(EpisodeRecord).filter(EpisodeRecord.id == episode_id).first()
@@ -73,14 +86,25 @@ def _get_episode_states(episode_id: int, db: Session):
     ds = db.query(Dataset).filter(Dataset.id == ep.dataset_id).first()
     if not ds:
         return None, False, 0, f"Dataset for episode {episode_id} not found"
-    parquet = Path(ds.path) / "data" / "chunk-000" / f"episode_{ep.episode_index:06d}.parquet"
-    if not parquet.exists():
+
+    parquet_rel = f"data/chunk-000/episode_{ep.episode_index:06d}.parquet"
+    try:
+        if is_r2_uri(ds.path):
+            df = pd.read_parquet(BytesIO(read_bytes(join_uri(ds.path, parquet_rel))))
+        else:
+            parquet = Path(ds.path) / parquet_rel
+            if not parquet.exists():
+                return None, False, 0, (
+                    f"Parquet data file not found: {parquet}. "
+                    f"The dataset directory may be empty - ensure the LeRobot dataset files are present at: {ds.path}"
+                )
+            df = pd.read_parquet(parquet)
+    except FileNotFoundError:
         return None, False, 0, (
-            f"Parquet data file not found: {parquet}. "
-            f"The dataset directory may be empty — ensure the LeRobot dataset "
-            f"files are present at: {ds.path}"
+            f"Parquet data file not found for episode {ep.episode_index}. "
+            f"The dataset files may not be available in storage for: {ds.path}"
         )
-    df = pd.read_parquet(parquet)
+
     states = np.stack(df["observation.state"].values).astype(np.float32)
     bimanual = states.shape[1] == 14
     return states, bimanual, len(states), None
@@ -91,7 +115,9 @@ async def simulator_ws(ws: WebSocket, token: str | None = None):
     if not token:
         await ws.close(code=4001, reason="Missing auth token")
         return
+
     from api.auth import decode_token as _decode
+
     try:
         payload = _decode(token)
         ws_user_id = int(payload.get("sub", 0))
@@ -104,14 +130,11 @@ async def simulator_ws(ws: WebSocket, token: str | None = None):
     if not _SIM_AVAILABLE:
         await ws.send_text(json.dumps({
             "type": "error",
-            "message": f"Simulator unavailable: {_SIM_IMPORT_ERROR}. "
-                       "Install mujoco, opencv-python-headless, and numpy to enable.",
+            "message": f"Simulator unavailable: {_SIM_IMPORT_ERROR}. Install mujoco, opencv-python-headless, and numpy to enable.",
         }))
         await ws.close()
         return
 
-    # Dedicated single-thread executor so all MuJoCo/OpenGL ops
-    # share the same thread (renderer context is thread-affine).
     mj_executor = ThreadPoolExecutor(max_workers=1)
 
     model = None
@@ -128,14 +151,13 @@ async def simulator_ws(ws: WebSocket, token: str | None = None):
 
     def _setup_camera() -> mujoco.MjvCamera:
         c = mujoco.MjvCamera()
-        c.azimuth   = DEFAULT_CAM["azimuth"]
+        c.azimuth = DEFAULT_CAM["azimuth"]
         c.elevation = DEFAULT_CAM["elevation"]
-        c.distance  = DEFAULT_CAM["distance"]
+        c.distance = DEFAULT_CAM["distance"]
         c.lookat[:] = [0.0, 0.0, 0.3]
         return c
 
     def _render_frame_sync(frame_idx: int) -> bytes:
-        """Runs inside mj_executor — pose + render + JPEG encode."""
         set_pose(data, states[frame_idx])
         rgb = render_frame(renderer, model, data, cam=cam)
         return _encode_frame_jpeg(rgb)
@@ -144,7 +166,6 @@ async def simulator_ws(ws: WebSocket, token: str | None = None):
         if model is None or states is None:
             return
         jpeg_bytes = await loop.run_in_executor(mj_executor, _render_frame_sync, frame_idx)
-
         header = json.dumps({
             "type": "frame",
             "frame_index": frame_idx,
@@ -168,8 +189,6 @@ async def simulator_ws(ws: WebSocket, token: str | None = None):
                 t0 = time.monotonic()
                 await _send_frame(current_frame)
                 elapsed = time.monotonic() - t0
-
-                # Skip frames if rendering is slower than target to stay real-time
                 skip = int(elapsed / frame_interval) if elapsed > frame_interval else 0
                 current_frame += 1 + skip
                 if current_frame >= total_frames:
@@ -189,7 +208,6 @@ async def simulator_ws(ws: WebSocket, token: str | None = None):
 
     from api.database import SessionLocal
 
-    cam_seq = 0
     _last_cam_render = [0.0]
 
     try:
@@ -226,9 +244,7 @@ async def simulator_ws(ws: WebSocket, token: str | None = None):
                     if renderer:
                         await loop.run_in_executor(mj_executor, renderer.close)
 
-                    model, data, renderer = await loop.run_in_executor(
-                        mj_executor, _load_model_streaming, bimanual
-                    )
+                    model, data, renderer = await loop.run_in_executor(mj_executor, _load_model_streaming, bimanual)
                     cam = _setup_camera()
                     states = ep_states
                     total_frames = n_frames
@@ -264,10 +280,7 @@ async def simulator_ws(ws: WebSocket, token: str | None = None):
                 if play_task and not play_task.done():
                     play_task.cancel()
                 direction = msg.get("direction", "forward")
-                if direction == "forward":
-                    current_frame = min(current_frame + 1, total_frames - 1)
-                else:
-                    current_frame = max(current_frame - 1, 0)
+                current_frame = min(current_frame + 1, total_frames - 1) if direction == "forward" else max(current_frame - 1, 0)
                 try:
                     await _send_frame(current_frame)
                 except Exception as exc:
@@ -289,15 +302,12 @@ async def simulator_ws(ws: WebSocket, token: str | None = None):
             elif cmd == "camera":
                 if cam is None:
                     cam = _setup_camera()
-                cam.azimuth   = float(msg.get("azimuth", cam.azimuth))
+                cam.azimuth = float(msg.get("azimuth", cam.azimuth))
                 cam.elevation = float(msg.get("elevation", cam.elevation))
-                cam.distance  = float(msg.get("distance", cam.distance))
+                cam.distance = float(msg.get("distance", cam.distance))
                 if "lookat" in msg:
                     la = msg["lookat"]
                     cam.lookat[:] = [float(la[0]), float(la[1]), float(la[2])]
-                cam_seq += 1
-                # During playback, the play_loop already renders with the updated cam — skip extra render.
-                # When paused, throttle: only render if enough time passed since last camera render.
                 if model is not None and not playing:
                     now = time.monotonic()
                     if now - _last_cam_render[0] >= 0.033:
@@ -329,7 +339,6 @@ async def simulator_ws(ws: WebSocket, token: str | None = None):
         mj_executor.shutdown(wait=False)
 
 
-# Replay to video (HTTP background job)
 @router.post("/episodes/{episode_id}/replay")
 def start_replay(
     episode_id: int,
@@ -353,8 +362,9 @@ def start_replay(
     )
     if existing:
         return {"job_id": existing.id, "status": existing.status}
-    parquet = Path(ds.path) / "data" / "chunk-000" / f"episode_{ep.episode_index:06d}.parquet"
-    output_path = settings.REPLAY_OUTPUT_PATH / f"episode_{episode_id}.mp4"
+
+    parquet_rel = f"data/chunk-000/episode_{ep.episode_index:06d}.parquet"
+    output_path = replay_object_uri(current_user.id, episode_id) if r2_enabled() else settings.REPLAY_OUTPUT_PATH / f"episode_{episode_id}.mp4"
 
     job = ReplayJob(
         episode_id=episode_id,
@@ -368,16 +378,16 @@ def start_replay(
     log_activity(db, current_user, "replay_start", f"Started replay for episode {ep.episode_index}", dataset_id=ds.id, episode_id=ep.id)
     db.commit()
 
-    # Run in background thread
     def _run():
         from api.database import SessionLocal
+
         _db = SessionLocal()
         try:
             _job = _db.query(ReplayJob).filter(ReplayJob.id == job_id).first()
             _job.status = "running"
             _db.commit()
 
-            _last_commit = [0]
+            _last_commit = [0.0]
 
             def _progress(cur, total):
                 _job.progress = cur / max(total, 1)
@@ -386,9 +396,28 @@ def start_replay(
                     _db.commit()
                     _last_commit[0] = now
 
-            result = replay_episode(parquet, output_path, progress_callback=_progress)
+            with materialize_files(ds.path, [parquet_rel, "meta/info.json"]) as work_dir:
+                local_parquet = work_dir / parquet_rel
+                if r2_enabled():
+                    replay_dir = Path(tempfile.mkdtemp(prefix="neotix_replay_"))
+                    local_output = replay_dir / f"episode_{episode_id}.mp4"
+                else:
+                    replay_dir = None
+                    local_output = Path(output_path)
+                    local_output.parent.mkdir(parents=True, exist_ok=True)
+
+                try:
+                    result = replay_episode(local_parquet, local_output, progress_callback=_progress)
+                    if r2_enabled():
+                        upload_file(result, str(output_path))
+                        _job.output_path = str(output_path)
+                    else:
+                        _job.output_path = str(result)
+                finally:
+                    if replay_dir is not None:
+                        shutil.rmtree(replay_dir, ignore_errors=True)
+
             _job.status = "done"
-            _job.output_path = str(result)
             _job.progress = 1.0
             _db.commit()
         except Exception as e:
@@ -443,7 +472,6 @@ def cancel_replay(episode_id: int, db: Session = Depends(get_db), current_user: 
 @router.get("/episodes/{episode_id}/replay/video")
 async def replay_video(episode_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user_flexible)):
     import aiofiles
-    from fastapi.responses import StreamingResponse
 
     job = (
         db.query(ReplayJob)
@@ -453,6 +481,11 @@ async def replay_video(episode_id: int, db: Session = Depends(get_db), current_u
     )
     if not job or not job.output_path:
         raise HTTPException(status_code=404, detail="Replay video not ready")
+
+    if is_r2_uri(job.output_path):
+        if not object_exists(job.output_path):
+            raise HTTPException(status_code=404, detail="Replay video file not found")
+        return RedirectResponse(presigned_url(job.output_path), status_code=307)
 
     video_path = Path(job.output_path)
     if not video_path.exists():
@@ -466,5 +499,8 @@ async def replay_video(episode_id: int, db: Session = Depends(get_db), current_u
                     break
                 yield chunk
 
-    return StreamingResponse(_iter(), media_type="video/mp4",
-                             headers={"Content-Length": str(video_path.stat().st_size)})
+    return StreamingResponse(
+        _iter(),
+        media_type="video/mp4",
+        headers={"Content-Length": str(video_path.stat().st_size)},
+    )

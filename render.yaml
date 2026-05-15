@@ -15,3 +15,15 @@ services:
         value: /app/data
       - key: CORS_ORIGINS
         sync: false
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET
+        sync: false
+      - key: R2_PUBLIC_DATASET_PREFIX
+        value: public-data
+      - key: PUBLIC_DEMO_DATASET_NAMES
+        value: ball_to_cup,dirty_towels

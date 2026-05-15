@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Database, Upload, FolderOpen, Merge, Zap, Trash2, Edit2, Check, X, CloudDownload, ChevronLeft, ChevronRight, Search, Download } from 'lucide-react' // eslint-disable-line
@@ -50,15 +50,15 @@ const activateMut = useMutation({
     onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Merge failed'),
   })
 
-  const importMut = useMutation({
-    mutationFn: ({ path, name }: { path: string; name: string }) => datasetsApi.importPath(path, name),
+  const folderUploadMut = useMutation({
+    mutationFn: ({ files, name }: { files: File[]; name: string }) => datasetsApi.uploadFolder(files, name),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['datasets'] })
-      qc.invalidateQueries({ queryKey: ['datasets-scan'] })
-      setImportFolder(null)
-      toast.success('Dataset imported')
+      setFolderSelection(null)
+      if (folderInputRef.current) folderInputRef.current.value = ''
+      toast.success('Dataset folder uploaded')
     },
-    onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Import failed'),
+    onError: (e: unknown) => toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Folder upload failed'),
   })
 
   const uploadMut = useMutation({
@@ -80,17 +80,22 @@ const activateMut = useMutation({
   const [mergeName, setMergeName] = useState('')
   const [showUpload, setShowUpload] = useState(false)
   const [uploadFile, setUploadFile] = useState<File | null>(null)
-  const [importFolder, setImportFolder] = useState<{ name: string; path: string } | null>(null)
-  const [showImportModal, setShowImportModal] = useState(false)
-  const [importPath, setImportPath] = useState('')
-  const [dragOver, setDragOver] = useState(false)
+  const [folderSelection, setFolderSelection] = useState<{ name: string; files: File[] } | null>(null)
   const [sourceFilter, setSourceFilter] = useState('')
   const [nameSearch, setNameSearch] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const folderInputRef = useRef<HTMLInputElement>(null)
 
   const [showMergeWizard, setShowMergeWizard] = useState(false)
   const [mergeCheck, setMergeCheck] = useState<{ compatible: boolean; errors: string[]; datasets: any[]; merged_tasks: any[] } | null>(null)
   const [mergeChecking, setMergeChecking] = useState(false)
+
+  useEffect(() => {
+    const input = folderInputRef.current
+    if (!input) return
+    input.setAttribute('webkitdirectory', '')
+    input.setAttribute('directory', '')
+  }, [])
 
   const toggleSelect = (id: number) =>
     setSelected((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
@@ -120,33 +125,13 @@ const activateMut = useMutation({
     if (f) setShowUpload(true)
   }
 
-  const confirmImportPath = () => {
-    const trimmed = importPath.trim()
-    if (!trimmed) return
-    const name = trimmed.split('/').pop()?.split('\\').pop() || trimmed
-    setImportFolder({ name, path: trimmed })
-    setShowImportModal(false)
-    setImportPath('')
-  }
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault()
-    setDragOver(false)
-    const items = e.dataTransfer.items
-    if (items?.length) {
-      const entry = items[0].webkitGetAsEntry?.()
-      if (entry?.isDirectory) {
-        const name = entry.name
-        setImportPath(`data/${name}`)
-        return
-      }
-    }
-    const files = e.dataTransfer.files
-    if (files.length > 0) {
-      const rel = (files[0] as any).webkitRelativePath || files[0].name
-      const name = rel.split('/')[0] || files[0].name
-      setImportPath(`data/${name}`)
-    }
+  const handleFolderFiles = (fileList: FileList | null) => {
+    if (!fileList?.length) return
+    const files = Array.from(fileList)
+    const firstRelativePath = (files[0] as File & { webkitRelativePath?: string }).webkitRelativePath || files[0].name
+    const name = firstRelativePath.split('/')[0] || files[0].name
+    setFolderSelection({ name, files })
+    if (folderInputRef.current) folderInputRef.current.value = ''
   }
 
   const autoName = uploadFile ? uploadFile.name.replace(/\.zip$/i, '') : ''
@@ -168,7 +153,8 @@ const activateMut = useMutation({
               <Merge className="w-3.5 h-3.5" /> Merge {selected.size} Datasets
             </Button>
           )}
-          <Button size="sm" variant="secondary" onClick={() => setShowImportModal(true)}>
+          <input ref={folderInputRef} type="file" multiple style={{ display: 'none' }} onChange={(e) => handleFolderFiles(e.target.files)} />
+          <Button size="sm" variant="secondary" onClick={() => folderInputRef.current?.click()}>
             <FolderOpen className="w-3.5 h-3.5" /> Import Folder
           </Button>
           {/* Hidden zip picker */}
@@ -181,10 +167,10 @@ const activateMut = useMutation({
 
       {/* Import confirmation panel */}
       <AnimatePresence>
-        {importFolder && (
+        {folderSelection && (
           <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} style={{ overflow: 'hidden', marginBottom: 18 }}>
             <div style={{ borderRadius: 14, padding: '20px 22px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.1)', position: 'relative' }}>
-              <button onClick={() => setImportFolder(null)} style={{ position: 'absolute', top: 10, right: 10, background: 'none', border: 'none', color: 'rgba(255,255,255,0.25)', cursor: 'pointer', padding: 4, display: 'flex', borderRadius: 4, transition: 'color 0.15s' }}
+              <button onClick={() => setFolderSelection(null)} style={{ position: 'absolute', top: 10, right: 10, background: 'none', border: 'none', color: 'rgba(255,255,255,0.25)', cursor: 'pointer', padding: 4, display: 'flex', borderRadius: 4, transition: 'color 0.15s' }}
                 onMouseEnter={(e) => (e.currentTarget.style.color = '#fff')}
                 onMouseLeave={(e) => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}>
                 <X style={{ width: 13, height: 13 }} />
@@ -194,13 +180,13 @@ const activateMut = useMutation({
                   <FolderOpen style={{ width: 17, height: 17, color: '#fff' }} />
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <p style={{ fontSize: 13, fontWeight: 600, color: '#fff', margin: 0 }}>{importFolder.name}</p>
+                  <p style={{ fontSize: 13, fontWeight: 600, color: '#fff', margin: 0 }}>{folderSelection.name}</p>
                   <p style={{ fontSize: 10, fontFamily: 'monospace', color: 'rgba(255,255,255,0.35)', margin: '4px 0 0', padding: '3px 8px', background: 'rgba(255,255,255,0.04)', borderRadius: 4, display: 'inline-block' }}>
-                    {importFolder.path}
+                    {folderSelection.files.length} files ready for upload
                   </p>
                 </div>
-                <Button size="sm" onClick={() => importMut.mutate({ path: importFolder.path, name: importFolder.name })} loading={importMut.isPending}>
-                  <CloudDownload className="w-3.5 h-3.5" /> Import
+                <Button size="sm" onClick={() => folderUploadMut.mutate({ files: folderSelection.files, name: folderSelection.name })} loading={folderUploadMut.isPending}>
+                  <CloudDownload className="w-3.5 h-3.5" /> Upload
                 </Button>
               </div>
             </div>
@@ -497,84 +483,6 @@ const activateMut = useMutation({
         )}
       </AnimatePresence>
 
-      {/* Import Folder Modal */}
-      <AnimatePresence>
-        {showImportModal && (
-          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-            onClick={() => { setShowImportModal(false); setImportPath('') }}
-            style={{ position: 'fixed', inset: 0, zIndex: 50, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(10px)' }}
-          >
-            <motion.div initial={{ scale: 0.94, y: 12 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.94 }}
-              onClick={(e) => e.stopPropagation()}
-              style={{ width: '100%', maxWidth: 420, margin: '0 16px', borderRadius: 14, padding: 28, background: '#0c0c0c', border: '1px solid rgba(255,255,255,0.1)', position: 'relative' }}
-            >
-              <button onClick={() => { setShowImportModal(false); setImportPath('') }} style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'rgba(255,255,255,0.25)', cursor: 'pointer', padding: 4, display: 'flex', transition: 'color 0.15s' }}
-                onMouseEnter={(e) => (e.currentTarget.style.color = '#fff')}
-                onMouseLeave={(e) => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}>
-                <X style={{ width: 13, height: 13 }} />
-              </button>
-
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 18 }}>
-                <div style={{ width: 40, height: 40, borderRadius: 10, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                  <FolderOpen style={{ width: 17, height: 17, color: '#fff' }} />
-                </div>
-                <div>
-                  <h2 style={{ fontSize: 15, fontWeight: 700, color: '#fff', margin: 0 }}>Import Dataset Folder</h2>
-                  <p style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', margin: '2px 0 0' }}>Drag a dataset folder to import it</p>
-                </div>
-              </div>
-
-              {/* Drop zone */}
-              <div
-                onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
-                onDragLeave={() => setDragOver(false)}
-                onDrop={handleDrop}
-                style={{
-                  borderRadius: 10, padding: importPath ? '20px' : '36px 20px', marginBottom: 20, textAlign: 'center',
-                  cursor: 'default',
-                  border: dragOver ? '2px dashed rgba(255,255,255,0.4)' : importPath ? '2px solid rgba(255,255,255,0.15)' : '2px dashed rgba(255,255,255,0.1)',
-                  background: dragOver ? 'rgba(255,255,255,0.06)' : importPath ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.02)',
-                  transition: 'all 0.15s',
-                }}
-              >
-                {importPath ? (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                    <div style={{ width: 36, height: 36, borderRadius: 8, background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.12)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                      <FolderOpen style={{ width: 16, height: 16, color: '#fff' }} />
-                    </div>
-                    <div style={{ flex: 1, minWidth: 0, textAlign: 'left' }}>
-                      <p style={{ fontSize: 13, fontWeight: 600, color: '#fff', margin: 0 }}>{importPath.split('/').pop()?.split('\\').pop()}</p>
-                      <p style={{ fontSize: 10, fontFamily: 'monospace', color: 'rgba(255,255,255,0.35)', margin: '3px 0 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{importPath}</p>
-                    </div>
-                    <button
-                      onClick={() => setImportPath('')}
-                      style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.25)', cursor: 'pointer', padding: 4, display: 'flex', flexShrink: 0, transition: 'color 0.15s' }}
-                      onMouseEnter={(e) => (e.currentTarget.style.color = '#fff')}
-                      onMouseLeave={(e) => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}
-                    >
-                      <X style={{ width: 13, height: 13 }} />
-                    </button>
-                  </div>
-                ) : (
-                  <>
-                    <FolderOpen style={{ width: 28, height: 28, color: dragOver ? '#fff' : 'rgba(255,255,255,0.2)', margin: '0 auto 8px', transition: 'color 0.15s' }} />
-                    <p style={{ fontSize: 12, color: dragOver ? '#fff' : 'rgba(255,255,255,0.35)', margin: 0, transition: 'color 0.15s' }}>
-                      {dragOver ? 'Drop folder here' : 'Drag and drop a dataset folder'}
-                    </p>
-                  </>
-                )}
-              </div>
-
-              <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                <Button variant="ghost" onClick={() => { setShowImportModal(false); setImportPath('') }}>Cancel</Button>
-                <Button onClick={confirmImportPath} disabled={!importPath.trim()}>
-                  <CloudDownload className="w-3.5 h-3.5" /> Import
-                </Button>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
     </div>
   )
 }
