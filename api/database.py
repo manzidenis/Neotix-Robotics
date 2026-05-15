@@ -46,55 +46,60 @@ def init_db() -> None:
 
 def _run_migrations() -> None:
     """Lightweight migration: add columns that may be missing in existing DBs."""
-    if engine.dialect.name != "sqlite":
-        return
-
     from sqlalchemy import text, inspect
     insp = inspect(engine)
-    cols = {c["name"] for c in insp.get_columns("datasets")} if insp.has_table("datasets") else set()
     with engine.begin() as conn:
-        if "source" not in cols:
-            conn.execute(text("ALTER TABLE datasets ADD COLUMN source VARCHAR(16) DEFAULT 'original'"))
-        if "user_id" not in cols:
-            conn.execute(text("ALTER TABLE datasets ADD COLUMN user_id INTEGER REFERENCES users(id)"))
-            conn.execute(text("UPDATE datasets SET user_id = (SELECT MIN(id) FROM users) WHERE user_id IS NULL"))
+        if engine.dialect.name == "sqlite":
+            cols = {c["name"] for c in insp.get_columns("datasets")} if insp.has_table("datasets") else set()
+            if "source" not in cols:
+                conn.execute(text("ALTER TABLE datasets ADD COLUMN source VARCHAR(16) DEFAULT 'original'"))
+            if "user_id" not in cols:
+                conn.execute(text("ALTER TABLE datasets ADD COLUMN user_id INTEGER REFERENCES users(id)"))
+                conn.execute(text("UPDATE datasets SET user_id = (SELECT MIN(id) FROM users) WHERE user_id IS NULL"))
 
-        # Drop the unique constraint on datasets.name so different users can
-        # have datasets with the same name (SQLite requires table recreation).
-        has_name_unique = False
-        if insp.has_table("datasets"):
-            row = conn.execute(text(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name='datasets'"
-            )).fetchone()
-            if row and row[0] and "UNIQUE" in row[0].upper():
-                has_name_unique = True
+            # Drop the unique constraint on datasets.name so different users can
+            # have datasets with the same name (SQLite requires table recreation).
+            has_name_unique = False
+            if insp.has_table("datasets"):
+                row = conn.execute(text(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='datasets'"
+                )).fetchone()
+                if row and row[0] and "UNIQUE" in row[0].upper():
+                    has_name_unique = True
 
-        if has_name_unique:
-            conn.execute(text("""
-                CREATE TABLE datasets_new (
-                    id INTEGER PRIMARY KEY,
-                    user_id INTEGER REFERENCES users(id),
-                    name VARCHAR(255) NOT NULL,
-                    path TEXT NOT NULL,
-                    is_active BOOLEAN DEFAULT 0,
-                    robot_type VARCHAR(16) DEFAULT 'single',
-                    total_episodes INTEGER DEFAULT 0,
-                    total_frames INTEGER DEFAULT 0,
-                    fps FLOAT DEFAULT 30.0,
-                    cameras TEXT DEFAULT '[]',
-                    source VARCHAR(16) DEFAULT 'original',
-                    created_at DATETIME,
-                    updated_at DATETIME
-                )
-            """))
-            conn.execute(text("""
-                INSERT INTO datasets_new
-                SELECT id, user_id, name, path, is_active, robot_type,
-                       total_episodes, total_frames, fps, cameras, source,
-                       created_at, updated_at
-                FROM datasets
-            """))
-            conn.execute(text("DROP TABLE datasets"))
-            conn.execute(text("ALTER TABLE datasets_new RENAME TO datasets"))
-            conn.execute(text("CREATE INDEX ix_datasets_id ON datasets (id)"))
-            conn.execute(text("CREATE INDEX ix_datasets_user_id ON datasets (user_id)"))
+            if has_name_unique:
+                conn.execute(text("""
+                    CREATE TABLE datasets_new (
+                        id INTEGER PRIMARY KEY,
+                        user_id INTEGER REFERENCES users(id),
+                        name VARCHAR(255) NOT NULL,
+                        path TEXT NOT NULL,
+                        is_active BOOLEAN DEFAULT 0,
+                        robot_type VARCHAR(16) DEFAULT 'single',
+                        total_episodes INTEGER DEFAULT 0,
+                        total_frames INTEGER DEFAULT 0,
+                        fps FLOAT DEFAULT 30.0,
+                        cameras TEXT DEFAULT '[]',
+                        source VARCHAR(16) DEFAULT 'original',
+                        created_at DATETIME,
+                        updated_at DATETIME
+                    )
+                """))
+                conn.execute(text("""
+                    INSERT INTO datasets_new
+                    SELECT id, user_id, name, path, is_active, robot_type,
+                           total_episodes, total_frames, fps, cameras, source,
+                           created_at, updated_at
+                    FROM datasets
+                """))
+                conn.execute(text("DROP TABLE datasets"))
+                conn.execute(text("ALTER TABLE datasets_new RENAME TO datasets"))
+                conn.execute(text("CREATE INDEX ix_datasets_id ON datasets (id)"))
+                conn.execute(text("CREATE INDEX ix_datasets_user_id ON datasets (user_id)"))
+
+        if insp.has_table("dataset_upload_jobs"):
+            if engine.dialect.name == "postgresql":
+                conn.execute(text("ALTER TABLE dataset_upload_jobs ALTER COLUMN source_filename TYPE TEXT"))
+                conn.execute(text("ALTER TABLE dataset_upload_jobs ALTER COLUMN source_path TYPE TEXT"))
+                conn.execute(text("ALTER TABLE dataset_upload_jobs ALTER COLUMN upload_id TYPE TEXT"))
+                conn.execute(text("ALTER TABLE dataset_upload_jobs ALTER COLUMN error_message TYPE TEXT"))
